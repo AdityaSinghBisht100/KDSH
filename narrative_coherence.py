@@ -114,11 +114,13 @@ class ThematicCoherenceModule(nn.Module):
                 continue
             
             # Average embeddings of sentences mentioning this entity
-            stacked = torch.stack(sent_embs)  # [num_mentions, d_model]
+            # Ensure all tensors are on the correct device
+            sent_embs_device = [emb.to(self.device) for emb in sent_embs]
+            stacked = torch.stack(sent_embs_device)  # [num_mentions, d_model]
             entity_emb = torch.mean(stacked, dim=0)  # [d_model]
             
-            # Encode with entity encoder
-            entity_emb = self.entity_encoder(entity_emb)
+            # Encode with entity encoder (ensure encoder is on device)
+            entity_emb = self.entity_encoder(entity_emb.to(self.device))
             
             entity_embeddings[entity_name] = entity_emb
         
@@ -293,11 +295,16 @@ class NarrativeCoherenceSystem(nn.Module):
         self.d_model = d_model
         self.device = device
         
-        # Thematic coherence module
-        self.thematic_module = ThematicCoherenceModule(bdh_model, d_model, device)
+        # Thematic coherence module - move to device
+        self.thematic_module = ThematicCoherenceModule(bdh_model, d_model, device).to(device)
         
-        # Temporal-causal GNN
-        self.temporal_causal_gnn = TemporalCausalGNN(d_model, n_heads=4, dropout=0.1)
+        # Temporal-causal GNN - move to device
+        try:
+            self.temporal_causal_gnn = TemporalCausalGNN(d_model, n_heads=4, dropout=0.1).to(device)
+            self.use_gnn = True
+        except ImportError:
+            self.temporal_causal_gnn = None
+            self.use_gnn = False
         
         # Knowledge graph builder
         self.graph_builder = KnowledgeGraphBuilder(d_model, device)
@@ -320,13 +327,17 @@ class NarrativeCoherenceSystem(nn.Module):
             backstory_constraints
         )
         
-        # Process graph with GNN to get refined embeddings
-        graph_data = self.backstory_graph.to_torch_geometric()
-        updated_features, _ = self.temporal_causal_gnn(graph_data)
-        
-        # Update graph with refined features
-        for i in range(len(self.backstory_graph.node_features)):
-            self.backstory_graph.node_features[i] = updated_features[i]
+        # Process graph with GNN to get refined embeddings (if GNN available)
+        if self.use_gnn and self.temporal_causal_gnn is not None:
+            try:
+                graph_data = self.backstory_graph.to_torch_geometric()
+                updated_features, _ = self.temporal_causal_gnn(graph_data)
+                
+                # Update graph with refined features
+                for i in range(len(self.backstory_graph.node_features)):
+                    self.backstory_graph.node_features[i] = updated_features[i]
+            except Exception as e:
+                print(f"Warning: GNN processing skipped: {e}")
     
     def get_backstory_summary(self) -> Dict:
         """Get summary of processed backstory."""
