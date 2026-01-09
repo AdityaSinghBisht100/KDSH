@@ -7,6 +7,13 @@ from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 
 from data_utils import NarrativeDocument, Sentence
+try:
+    from torch_geometric.data import Data, Batch
+    from temporal_causal_gnn import TemporalCausalGNN
+    HAS_GNN = True
+except ImportError:
+    HAS_GNN = False
+    print("Warning: Torch Geometric not found per sentence_analyzer, GNN features disabled.")
 
 
 @dataclass
@@ -33,12 +40,86 @@ class DevelopmentInfo:
     description: str
 
 
+class CoherenceClassifier(nn.Module):
+    """
+    Trained classifier for consistency between Content and Context.
+    Input: Content Embedding, Context Embedding
+    Output: Logits [Contradict, Consistent]
+    """
+    def __init__(self, input_dim, device):
+        super().__init__()
+        self.device = device
+        self.use_gnn = HAS_GNN
+        
+        if self.use_gnn:
+            self.gnn = TemporalCausalGNN(d_model=input_dim, n_heads=4, dropout=0.1)
+            
+        self.net = nn.Sequential(
+            nn.Linear(input_dim * 4, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 2) # 0: Contradict, 1: Consistent
+        )
+        
+    def forward(self, content_emb, context_emb):
+        # GNN Enhancement
+        if self.use_gnn:
+            batch_size = content_emb.size(0)
+            data_list = []
+            edge_type = 4 # thematic_relates
+            
+            for i in range(batch_size):
+                # 2 nodes: Content (0), Context (1)
+                x = torch.stack([content_emb[i], context_emb[i]]) # [2, D]
+                
+                # Directed Edge: Context (1) -> Content (0)
+                # Prevents over-smoothing
+                edge_index = torch.tensor([[1], [0]], dtype=torch.long, device=self.device)
+                edge_attr = torch.tensor([edge_type], dtype=torch.long, device=self.device)
+                pos = torch.tensor([0, 0], dtype=torch.long, device=self.device)
+                
+                data_list.append(Data(x=x, edge_index=edge_index, edge_attr=edge_attr, pos=pos))
+            
+            # Simple batching from list
+            batch = Batch.from_data_list(data_list)
+            
+            # Run GNN
+            out_nodes, _ = self.gnn(batch) # [2*B, D]
+            out_nodes = out_nodes.view(batch_size, 2, -1)
+            
+            # Update embeddings with graph context
+            content_emb = out_nodes[:, 0, :]
+            context_emb = out_nodes[:, 1, :]
+            
+        # Feature interaction
+        features = torch.cat([
+            content_emb, 
+            context_emb, 
+            torch.abs(content_emb - context_emb),
+            content_emb * context_emb
+        ], dim=1)
+        
+        return self.net(features)
+
 class CoherenceScorer(nn.Module):
-    """Multi-dimensional scoring for narrative coherence."""
+    """
+    Multi-dimensional scoring for narrative coherence.
+    Now wraps the trained CoherenceClassifier for consistency check.
+    """
     
-    def __init__(self, d_model: int):
+    def __init__(self, d_model: int, device: torch.device):
         super().__init__()
         self.d_model = d_model
+        
+        # Trained consistency classifier
+        self.consistency_net = CoherenceClassifier(d_model, device)
+        
+        # Keep other scorers for granular feedback (or assume they are untrained for now)
+        # We will use consistency_net for the main "is_violation" signal
         
         # Temporal coherence scorer
         self.temporal_scorer = nn.Sequential(
@@ -47,72 +128,35 @@ class CoherenceScorer(nn.Module):
             nn.Linear(d_model, 1),
             nn.Sigmoid()
         )
-        
-        # Causal coherence scorer
-        self.causal_scorer = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, 1),
-            nn.Sigmoid()
-        )
-        
-        # Thematic coherence scorer
-        self.thematic_scorer = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, 1),
-            nn.Sigmoid()
-        )
-        
-        # Character consistency scorer
-        self.character_scorer = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, 1),
-            nn.Sigmoid()
-        )
-        
-        # Violation detector
-        self.violation_detector = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()
-        )
-    
+        # ... (others omitted for brevity if we rely on consistency_net)
+
     def forward(
         self,
         current_sentence_emb: torch.Tensor,
         backstory_context_emb: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
-        """
-        Compute coherence scores.
-        Args:
-            current_sentence_emb: [d_model] embedding of current sentence
-            backstory_context_emb: [d_model] relevant backstory context
-        Returns:
-            Dictionary of scores
-        """
-        # Concatenate embeddings
-        combined = torch.cat([current_sentence_emb, backstory_context_emb], dim=0)  # [2*d_model]
-        combined = combined.unsqueeze(0)  # [1, 2*d_model]
         
-        # Compute individual scores
-        temporal_score = self.temporal_scorer(combined).squeeze()
-        causal_score = self.causal_scorer(combined).squeeze()
-        thematic_score = self.thematic_scorer(combined).squeeze()
-        character_score = self.character_scorer(combined).squeeze()
+        # Combine for legacy scorers
+        combined = torch.cat([current_sentence_emb, backstory_context_emb], dim=0).unsqueeze(0)
         
-        # Violation probability
-        violation_prob = self.violation_detector(combined).squeeze()
+        # Run trained classifier
+        # Reshape for batch dim if needed (input is 1D here)
+        c_emb = current_sentence_emb.unsqueeze(0)
+        b_emb = backstory_context_emb.unsqueeze(0)
+        
+        logits = self.consistency_net(c_emb, b_emb) # [1, 2]
+        probs = F.softmax(logits, dim=1)
+        consistency_score = probs[0, 1] # Probability of "Consistent"
+        violation_prob = probs[0, 0]    # Probability of "Contradict"
+        
+        # For now, map consistency to other scores to keep API compatible
+        # In a real system, we'd train granular heads.
         
         return {
-            'temporal': temporal_score,
-            'causal': causal_score,
-            'thematic': thematic_score,
-            'character': character_score,
+            'temporal': consistency_score, # Proxy
+            'causal': consistency_score,
+            'thematic': consistency_score,
+            'character': consistency_score,
             'violation_prob': violation_prob
         }
 
@@ -220,8 +264,8 @@ class SentenceAnalyzer(nn.Module):
         self.d_model = d_model
         self.device = device
         
-        # Coherence scorer
-        self.coherence_scorer = CoherenceScorer(d_model)
+        # Coherence scorer - move to device
+        self.coherence_scorer = CoherenceScorer(d_model, device).to(device)
         
         # Violation detector
         self.violation_detector = ViolationDetector()
@@ -229,13 +273,13 @@ class SentenceAnalyzer(nn.Module):
         # Development tracker
         self.development_tracker = DevelopmentTracker()
         
-        # Context retrieval (simple attention-based)
+        # Context retrieval (simple attention-based) - move to device
         self.context_retrieval = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=4,
             dropout=0.1,
             batch_first=True
-        )
+        ).to(device)
     
     def encode_sentence(self, sentence: Sentence) -> torch.Tensor:
         """Encode a single sentence using BDH."""

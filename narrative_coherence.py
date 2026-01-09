@@ -35,10 +35,10 @@ class ThematicCoherenceModule(nn.Module):
             num_heads=4,
             dropout=0.1,
             batch_first=True
-        )
+        ).to(device)
         
         # Query vector for attention pooling
-        self.global_query = nn.Parameter(torch.randn(1, 1, d_model))
+        self.global_query = nn.Parameter(torch.randn(1, 1, d_model, device=device))
         
         # Thematic vector projection
         self.thematic_projection = nn.Sequential(
@@ -47,14 +47,14 @@ class ThematicCoherenceModule(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(d_model, d_model)
-        )
+        ).to(device)
         
         # Entity encoder
         self.entity_encoder = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.ReLU(),
             nn.Linear(d_model, d_model)
-        )
+        ).to(device)
     
     def encode_text_chunks(self, text_tokens: torch.Tensor) -> torch.Tensor:
         """
