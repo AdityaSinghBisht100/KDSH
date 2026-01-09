@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 import math
 
 try:
@@ -12,6 +12,8 @@ try:
     HAS_TORCH_GEOMETRIC = True
 except ImportError:
     HAS_TORCH_GEOMETRIC = False
+    Data = Any  # Fallback for type hints
+    Batch = Any
     print("Warning: PyTorch Geometric not installed. Install with: pip install torch-geometric")
 
 
