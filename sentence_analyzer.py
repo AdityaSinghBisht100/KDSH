@@ -357,18 +357,31 @@ class SentenceAnalyzer(nn.Module):
         self,
         current_story: NarrativeDocument,
         backstory_sentence_embs: torch.Tensor,
-        backstory_entities: Dict[str, Dict]
+        backstory_entities: Dict[str, Dict],
+        show_progress: bool = True
     ) -> List[CoherenceScore]:
         """
         Analyze entire current story document.
         Returns list of coherence scores for each sentence.
         """
+        from tqdm import tqdm
+        
         results = []
         
-        for idx, sentence in enumerate(current_story.sentences):
+        sentences = current_story.sentences
+        if show_progress:
+            sentences = tqdm(
+                sentences,
+                desc="Analyzing sentences",
+                unit="sent",
+                ncols=80
+            )
+        
+        for idx, sentence in enumerate(sentences):
             score = self.analyze_sentence(
                 sentence, idx, backstory_sentence_embs, backstory_entities
             )
             results.append(score)
         
         return results
+

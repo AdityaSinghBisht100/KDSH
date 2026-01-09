@@ -232,55 +232,186 @@ class NarrativeAnalyzer:
         
         return report
     
-    def print_summary(self, report: Dict):
-        """Print human-readable summary of analysis."""
+    def print_summary(self, report: Dict, show_details: bool = True):
+        """Print human-readable summary of analysis with detailed output."""
+        from tqdm import tqdm
+        
         print("\n" + "="*70)
-        print("NARRATIVE COHERENCE ANALYSIS REPORT")
+        print("📊 NARRATIVE COHERENCE ANALYSIS REPORT")
         print("="*70)
         
-        print(f"\nTotal Sentences Analyzed: {report['summary']['total_sentences']}")
-        print(f"Violations Detected: {report['summary']['violations_detected']}")
-        print(f"Violation Rate: {report['summary']['violation_rate']:.2%}")
+        # Summary section
+        print("\n📋 SUMMARY")
+        print("-"*40)
+        total = report['summary']['total_sentences']
+        violations = report['summary']['violations_detected']
+        rate = report['summary']['violation_rate']
         
-        print("\n--- Average Coherence Scores ---")
+        print(f"  Total Sentences Analyzed: {total}")
+        print(f"  Violations Detected:      {violations}")
+        print(f"  Violation Rate:           {rate:.2%}")
+        
+        # Coherence scores with visual bars
+        print("\n📈 AVERAGE COHERENCE SCORES")
+        print("-"*40)
+        
         for key, value in report['average_scores'].items():
-            print(f"{key.replace('_', ' ').title()}: {value:.3f}")
+            bar_length = int(value * 20)
+            bar = "█" * bar_length + "░" * (20 - bar_length)
+            label = key.replace('_', ' ').title()
+            print(f"  {label:25s} [{bar}] {value:.3f}")
         
+        # Violations section
         if report['violations_by_type']:
-            print("\n--- Violations by Type ---")
-            for vtype, violations in report['violations_by_type'].items():
-                print(f"\n{vtype.replace('_', ' ').title()}: {len(violations)} occurrences")
-                if violations:
-                    print(f"  Example: {violations[0]['explanation']}")
+            print("\n⚠️  VIOLATIONS DETECTED")
+            print("-"*40)
+            for vtype, violations_list in report['violations_by_type'].items():
+                print(f"\n  🔴 {vtype.replace('_', ' ').title()}: {len(violations_list)} occurrences")
+                for i, v in enumerate(violations_list[:3]):  # Show first 3 examples
+                    print(f"     └─ {v['explanation']}")
+        else:
+            print("\n✅ NO VIOLATIONS DETECTED")
+            print("-"*40)
+            print("  All sentences are coherent with the backstory.")
+        
+        # Detailed sentence-by-sentence results
+        if show_details and report['detailed_results']:
+            print("\n📝 SENTENCE-BY-SENTENCE ANALYSIS")
+            print("-"*40)
+            
+            for result in report['detailed_results']:
+                idx = result['sentence_index']
+                overall = result['overall_score']
+                is_violation = result['is_violation']
+                
+                # Status icon
+                if is_violation:
+                    status = "🔴"
+                elif overall < 0.6:
+                    status = "🟡"
+                else:
+                    status = "🟢"
+                
+                # Score bar
+                bar_len = int(overall * 10)
+                bar = "█" * bar_len + "░" * (10 - bar_len)
+                
+                print(f"  {status} Sentence {idx+1:3d}: [{bar}] {overall:.2f}")
+                
+                # Show violation details
+                if is_violation:
+                    print(f"       └─ ⚠️  {result['violation_type']}: {result['explanation'][:60]}...")
         
         print("\n" + "="*70)
+        print("✨ Analysis Complete!")
+        print("="*70)
+    
+    def print_detailed_sentence(self, result: Dict, sentence_text: str = None):
+        """Print detailed analysis for a single sentence."""
+        print(f"\n{'─'*50}")
+        print(f"Sentence {result['sentence_index'] + 1}")
+        if sentence_text:
+            print(f"Text: \"{sentence_text[:80]}{'...' if len(sentence_text) > 80 else ''}\"")
+        print(f"{'─'*50}")
+        
+        scores = [
+            ("Temporal", result['temporal_score']),
+            ("Causal", result['causal_score']), 
+            ("Thematic", result['thematic_score']),
+            ("Character", result['character_score']),
+            ("Overall", result['overall_score']),
+        ]
+        
+        for name, score in scores:
+            bar = "█" * int(score * 10) + "░" * (10 - int(score * 10))
+            print(f"  {name:12s}: [{bar}] {score:.3f}")
+        
+        if result['is_violation']:
+            print(f"\n  ⚠️  VIOLATION: {result['violation_type']}")
+            print(f"      {result['explanation']}")
+
 
 
 def main():
     """Example usage of the narrative analyzer."""
-    import sys
+    import argparse
     
-    if len(sys.argv) < 3:
-        print("Usage: python inference.py <backstory_file> <current_story_file> [output_report.json]")
-        print("\nExample:")
-        print("  python inference.py backstory.txt current_story.txt report.json")
-        return
+    parser = argparse.ArgumentParser(
+        description="Narrative Coherence Analysis System - Analyze backstory influence on current story",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python inference.py --backstory backstory.txt --current current_story.txt
+  python inference.py -b backstory.txt -c current_story.txt -o report.json
+  python inference.py --backstory backstory.txt --current current_story.txt --checkpoint model.pt
+        """
+    )
     
-    backstory_file = sys.argv[1]
-    current_story_file = sys.argv[2]
-    output_file = sys.argv[3] if len(sys.argv) > 3 else "coherence_report.json"
+    parser.add_argument(
+        "-b", "--backstory",
+        type=str,
+        required=True,
+        help="Path to backstory text file"
+    )
+    
+    parser.add_argument(
+        "-c", "--current",
+        type=str,
+        required=True,
+        help="Path to current story text file"
+    )
+    
+    parser.add_argument(
+        "-o", "--output",
+        type=str,
+        default="coherence_report.json",
+        help="Path to output report file (default: coherence_report.json)"
+    )
+    
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to model checkpoint file (optional)"
+    )
+    
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable embedding cache"
+    )
+    
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["cuda", "cpu", "auto"],
+        default="auto",
+        help="Device to run on (default: auto)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Set device
+    if args.device == "auto":
+        device = None  # Let NarrativeAnalyzer choose
+    else:
+        device = torch.device(args.device)
     
     # Initialize analyzer
-    analyzer = NarrativeAnalyzer()
+    analyzer = NarrativeAnalyzer(
+        model_checkpoint=args.checkpoint,
+        device=device,
+        use_cache=not args.no_cache
+    )
     
     # Process backstory
-    analyzer.process_backstory(backstory_file)
+    analyzer.process_backstory(args.backstory)
     
     # Analyze current story
-    results = analyzer.analyze_current_story(current_story_file)
+    results = analyzer.analyze_current_story(args.current)
     
     # Generate and print report
-    report = analyzer.generate_report(results, output_file)
+    report = analyzer.generate_report(results, args.output)
     analyzer.print_summary(report)
     
     # Cleanup
@@ -289,3 +420,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
