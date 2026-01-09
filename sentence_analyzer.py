@@ -307,6 +307,10 @@ class SentenceAnalyzer(nn.Module):
         Returns:
             [d_model] aggregated context from relevant backstory
         """
+        # Ensure all tensors are on the correct device
+        current_sentence_emb = current_sentence_emb.to(self.device)
+        backstory_sentence_embs = backstory_sentence_embs.to(self.device)
+        
         # Compute similarity scores
         current_emb_norm = F.normalize(current_sentence_emb.unsqueeze(0), dim=-1)  # [1, d_model]
         backstory_emb_norm = F.normalize(backstory_sentence_embs, dim=-1)  # [N, d_model]
@@ -349,7 +353,7 @@ class SentenceAnalyzer(nn.Module):
         # Encode current sentence
         current_emb = self.encode_sentence(sentence)
         
-        # Retrieve relevant backstory context
+        # Retrieve relevant backstory context (ensures tensors are on correct device)
         backstory_context = self.retrieve_relevant_backstory(
             current_emb,
             backstory_sentence_embs,

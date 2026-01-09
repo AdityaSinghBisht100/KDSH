@@ -64,7 +64,7 @@ class NarrativeAnalyzer:
             self.bdh_model,
             d_model=self.bdh_config.n_embd,
             device=self.device
-        )
+        ).to(self.device)
         
         # Document builder
         self.doc_builder = NarrativeDocumentBuilder()
