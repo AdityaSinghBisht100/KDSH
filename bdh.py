@@ -36,7 +36,9 @@ class Attention(torch.nn.Module):
         nh = config.n_head
         D = config.n_embd
         N = config.mlp_internal_dim_multiplier * D // nh
-        self.freqs = torch.nn.Buffer(
+        # Use register_buffer for compatibility with older PyTorch versions
+        self.register_buffer(
+            'freqs',
             get_freqs(N, theta=2**16, dtype=torch.float32).view(1, 1, 1, N)
         )
 
