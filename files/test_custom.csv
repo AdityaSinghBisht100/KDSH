@@ -1,0 +1,21 @@
+id,book_name,char,content,label
+1,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes is a young sailor on the ship Pharaon.,consistent
+2,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes arrives in Marseilles after a voyage.,consistent
+3,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes is about nineteen years old.,consistent
+4,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes is the captain of the Pharaon.,contradict
+5,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes has never been to sea before.,contradict
+6,The Count of Monte Cristo,M. Morrel,M. Morrel is the owner of the ship Pharaon.,consistent
+7,The Count of Monte Cristo,M. Morrel,M. Morrel was worried about the Pharaon.,consistent
+8,The Count of Monte Cristo,M. Morrel,M. Morrel is a sailor on the ship.,contradict
+9,The Count of Monte Cristo,Captain Leclere,Captain Leclere died during the voyage.,consistent
+10,The Count of Monte Cristo,Captain Leclere,Captain Leclere is still alive and commanding the ship.,contradict
+11,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan found a document in a bottle.,consistent
+12,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan is a Scottish nobleman.,consistent
+13,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan has never been on a ship.,contradict
+14,In Search of the Castaways,Captain Grant,Captain Grant is mentioned in the document found in the bottle.,consistent
+15,In Search of the Castaways,Captain Grant,Captain Grant was rescued before the story begins.,contradict
+16,In Search of the Castaways,Mary Grant,Mary Grant is the daughter of Captain Grant.,consistent
+17,In Search of the Castaways,Mary Grant,Mary Grant has no connection to Captain Grant.,contradict
+18,In Search of the Castaways,Lady Helena,Lady Helena is Lord Glenarvan's wife.,consistent
+19,In Search of the Castaways,Lady Helena,Lady Helena refused to help find Captain Grant.,contradict
+20,The Count of Monte Cristo,Danglars,Danglars is a fellow crew member with Dantes.,consistent

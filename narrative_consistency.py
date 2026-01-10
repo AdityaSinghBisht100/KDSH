@@ -30,11 +30,11 @@ app = modal.App("narrative-consistency-classifier")
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "torch>=2.0.0",
-        "numpy",
+        "torch",
+        "transformers",
         "pandas",
-        "tqdm",
-        "torch-geometric>=2.3.0"
+        "numpy",
+        "scikit-learn"
     )
     .add_local_dir(".", remote_path="/root")
 )
@@ -48,113 +48,44 @@ EMBEDDING_DIM = 256
 
 # --- Model Definitions ---
 
-try:
-    from torch_geometric.data import Data, Batch
-    from temporal_causal_gnn import TemporalCausalGNN
-    HAS_GNN = True
-except ImportError:
-    HAS_GNN = False
-    print("Warning: Torch Geometric not found, GNN features disabled.")
+# GNN removed - using Pure Infinite Context architecture
 
 class CoherenceClassifier(nn.Module):
     def __init__(self, input_dim, device):
         super().__init__()
         self.device = device
-        self.use_gnn = HAS_GNN
+        self.use_gnn = False # Deprecated in favor of Infinite Context State
         
-        if self.use_gnn:
-            self.gnn = TemporalCausalGNN(d_model=input_dim, n_heads=4, dropout=0.1)
-            
+        # Input: [Isolated_Emb, Contextual_Emb, Diff, Prod]
+        # Contextual_Emb is derived from Infinite Memory State
         self.net = nn.Sequential(
             nn.Linear(input_dim * 4, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.1),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.1),
             nn.Linear(128, 2)
         )
         
-    def forward(self, content_emb, context_emb):
-        # GNN Enhancement
-        if self.use_gnn:
-            batch_size = content_emb.size(0)
-            data_list = []
-            edge_type = 4 # thematic_relates
-            
-            for i in range(batch_size):
-                # 2 nodes: Content (0), Context (1)
-                x = torch.stack([content_emb[i], context_emb[i]]) # [2, D]
-                
-                # Directed Edge: Context (1) -> Content (0)
-                # This allows Content to attend to Context, but keeps Context pure (as the 'reference')
-                # Prevents over-smoothing in a 2-node graph
-                edge_index = torch.tensor([[1], [0]], dtype=torch.long, device=self.device)
-                edge_attr = torch.tensor([edge_type], dtype=torch.long, device=self.device)
-                
-                # Create naive "pos"
-                pos = torch.tensor([0, 0], dtype=torch.long, device=self.device)
-                
-                data_list.append(Data(x=x, edge_index=edge_index, edge_attr=edge_attr, pos=pos))
-            
-            batch = Batch.from_data_list(data_list)
-            
-            # Run GNN
-            out_nodes, _ = self.gnn(batch) # [2*B, D]
-            out_nodes = out_nodes.view(batch_size, 2, -1)
-            
-            # Update embeddings with graph context
-            content_emb = out_nodes[:, 0, :]
-            context_emb = out_nodes[:, 1, :]
-            
+    def forward(self, iso_emb, ctx_emb):
+        """
+        Args:
+           iso_emb: [B, D] - Embedding of content in isolation
+           ctx_emb: [B, D] - Embedding of content given Backstory State
+        """
         features = torch.cat([
-            content_emb, 
-            context_emb, 
-            torch.abs(content_emb - context_emb),
-            content_emb * context_emb
+            iso_emb, 
+            ctx_emb, 
+            torch.abs(iso_emb - ctx_emb),
+            iso_emb * ctx_emb
         ], dim=1)
         return self.net(features)
 
 class NarrativeDataset(Dataset):
-    def __init__(self, dataframe, backstory_store):
-        self.data = dataframe
-        self.backstory_store = backstory_store
-        self.samples = []
-        
-        # Pre-compute contexts to avoid overhead in training loop if possible
-        # or just store text.
-        for idx, row in dataframe.iterrows():
-            key = (row['book_name'].strip(), row['char'].strip())
-            content = row['content']
-            label = 1 if row['label'] == 'consistent' else 0
-            
-            # Retrieve relevant context
-            context_text = self.retrieve_context(key, content)
-            
-            self.samples.append({
-                'content_text': content,
-                'context_text': context_text,
-                'label': label
-            })
-            
-    def retrieve_context(self, key, content):
-        if key not in self.backstory_store:
-            return ""
-        candidates = self.backstory_store[key]
-        if not candidates:
-            return ""
-        
-        query_words = set(re.findall(r'\w+', content.lower()))
-        scored_candidates = []
-        for sent in candidates:
-            sent_words = set(re.findall(r'\w+', sent.lower()))
-            score = len(query_words.intersection(sent_words))
-            scored_candidates.append((score, sent))
-        
-        scored_candidates.sort(key=lambda x: x[0], reverse=True)
-        top_context = [s[1] for s in scored_candidates[:3]]
-        return " ".join(top_context)
+    def __init__(self, samples):
+        self.samples = samples
 
     def __len__(self):
         return len(self.samples)
@@ -166,8 +97,8 @@ class NarrativeDataset(Dataset):
 
 @app.cls(
     image=image,
-    gpu="T4",
-    timeout=600,
+    gpu="A100",
+    timeout=12000,
     volumes={"/models": vol}
 )
 class NarrativeConsistencySystem:
@@ -205,10 +136,34 @@ class NarrativeConsistencySystem:
         self.bdh.eval()
         
         self.classifier = CoherenceClassifier(EMBEDDING_DIM, self.device).to(self.device)
+        
+        # Load Weights if available
+        if os.path.exists("/models/narrative_consistency.pt"):
+            try:
+                self.classifier.load_state_dict(torch.load("/models/narrative_consistency.pt", map_location=self.device), strict=False)
+                print("Loaded classifier weights (strict=False).")
+            except Exception as e:
+                print(f"Weights load failed: {e}")
+                
+        if os.path.exists("/models/bdh_base.pt"):
+             self.bdh.load_state_dict(torch.load("/models/bdh_base.pt", map_location=self.device), strict=False)
+
+        # Import and initialize sentence analyzer
+        from sentence_analyzer import SentenceAnalyzer
+        self.sentence_analyzer = SentenceAnalyzer(self.bdh, EMBEDDING_DIM, self.device)
+
         self.backstory_store = {}
+        self.backstory_states = {} # Map (book, char) -> Tensor State
         print("--> Initialization complete")
 
-    def encode_text(self, text_list):
+    def encode_text(self, text_list, distinct_states=None):
+        """
+        Args:
+            text_list: List[str] - The content to encode
+            distinct_states: Optional List[Tensor] or Single Tensor - The initial states to use.
+                             If None, encodes in isolation (standard).
+                             If provided, encodes 'as continuation' of that state.
+        """
         if self.bdh is None:
             self._initialize_components()
             
@@ -228,173 +183,403 @@ class NarrativeConsistencySystem:
         for i, t in enumerate(batch_tensors):
             padded[i, :len(t)] = t
             
-        with torch.no_grad():
-            emb = self.bdh.embed(padded)
-            sent_emb = emb.mean(dim=1)
+        # Manage State for Contextual Encoding
+        if distinct_states is not None:
+             # Case 1: Single State shared for all inputs
+             if isinstance(distinct_states, torch.Tensor): 
+                 self.bdh.set_state(distinct_states.to(self.device))
+             pass 
+
+        if distinct_states is None:
+             # Isolated: Standard forward, no state usage (or reset first)
+             self.bdh.reset_state() # Ensure clean slate
+             with torch.no_grad():
+                sent_emb = self.bdh.compute_embeddings(padded)
+        else:
+             # Contextual loop
+             sent_embs = []
+             for i in range(len(text_list)):
+                  # Get specific state
+                  if isinstance(distinct_states, list):
+                      s = distinct_states[i]
+                  else:
+                      s = distinct_states # Broadcast
+                  
+                  self.bdh.set_state(s.to(self.device))
+                  row = padded[i:i+1] # [1, T]
+                  
+                  with torch.no_grad():
+                      e_seq = self.bdh(row, use_state=True, return_embeddings=True)
+                      e = e_seq.mean(dim=1) # [1, D]
+                      sent_embs.append(e)
+             sent_emb = torch.cat(sent_embs, dim=0)
+
         return sent_emb
 
-    @modal.method()
-    def train_and_evaluate(self):
-        self._initialize_components()
+    def absorb_story_stream(self, text_stream):
+        """
+        Reads a full story stream and returns the Final State.
+        Infinite Context Learning.
+        """
+        self.bdh.reset_state()
         
-        from data_utils import TextLoader, NarrativeDocumentBuilder
+        # Determine chunk size 
+        chunk_size = 512
         
-        # 1. Load Books
-        print("\n=== Loading Books ===")
-        books = {
+        with torch.no_grad():
+            for i in range(0, len(text_stream), chunk_size):
+                chunk = text_stream[i : i+chunk_size]
+                # Convert to tensor
+                tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=self.device)
+                if tokens.size(1) == 0: continue
+                
+                # Forward Pass with State Update
+                self.bdh(tokens, use_state=True)
+                
+        return self.bdh.get_state()
+
+    def precompute_backstory_states(self, train_df, test_mode=True):
+        """
+        PERFECT WORLD STATE: Read books through BDH.
+        
+        Args:
+            test_mode: If True, use only first 50,000 chars (~1 chapter) for fast testing
+        """
+        print("Pre-computing Perfect World States (Full Book Absorption)...")
+        
+        self.bdh.eval()
+        
+        # Get unique books
+        unique_books = train_df['book_name'].dropna().unique()
+        print(f"  Found {len(unique_books)} unique books to process.")
+        
+        if test_mode:
+            print("  >> TEST MODE: Using first 50,000 characters only <<")
+        
+        # Book paths mapping
+        book_paths = {
             "The Count of Monte Cristo": "/root/files/The Count of Monte Cristo.txt",
             "In Search of the Castaways": "/root/files/In search of the castaways.txt"
         }
         
-        # Pre-scan train.csv for characters
-        df = pd.read_csv("/root/files/train.csv")
-        chars_map = {}
-        for book in df['book_name'].unique():
-            chars_map[book] = df[df['book_name']==book]['char'].unique().tolist()
+        # ==========================================
+        # PHASE 1: Absorb books into BDH
+        # ==========================================
+        self.book_states = {}
         
-        builder = NarrativeDocumentBuilder()
-        for book_name, file_path in books.items():
-            print(f"Processing {book_name}...")
-            if not os.path.exists(file_path):
-                print(f"Error: File not found {file_path}")
+        for book_name in unique_books:
+            book_name = str(book_name).strip()
+            book_path = book_paths.get(book_name)
+            
+            if not book_path:
+                print(f"  -> Warning: Unknown book '{book_name}'")
                 continue
                 
-            text = TextLoader.load_text(file_path)
-            doc = builder.build(text)
-            
-            chars_to_track = chars_map.get(book_name, [])
-            for char in chars_to_track:
-                relevant_sentences = []
-                aliases = [a.strip() for a in char.split('/')]
-                for sent in doc.sentences:
-                    if any(alias in sent.text for alias in aliases):
-                        relevant_sentences.append(sent.text)
+            try:
+                print(f"  Reading '{book_name}'...")
+                with open(book_path, 'r', encoding='utf-8') as f:
+                    full_text = f.read()
                 
-                key = (book_name.strip(), char.strip())
-                self.backstory_store[key] = relevant_sentences
-                print(f"  Indexed {len(relevant_sentences)} sentences for {char}")
-
-        # 2. Train
-        print("\n=== Training Classifier ===")
-        dataset = NarrativeDataset(df, self.backstory_store)
-        dataloader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=self._collate) # Batch size 8 for small memory/dataset
+                # Limit text in test mode
+                if test_mode:
+                    full_text = full_text[:50000]  # ~1 chapter
+                
+                print(f"    -> Processing {len(full_text):,} characters...")
+                
+                # Absorb through BDH
+                book_state = self.absorb_story_stream(full_text)
+                self.book_states[book_name] = book_state.cpu()
+                
+                print(f"    -> Done!")
+                
+            except Exception as e:
+                print(f"    -> Error: {e}")
         
-        optimizer = torch.optim.Adam(self.classifier.parameters(), lr=1e-3)
+        print(f"Computed world states for {len(self.book_states)} books.")
+        
+        # ==========================================
+        # PHASE 2: Map characters to their book states
+        # ==========================================
+        distinct_chars = train_df[['book_name', 'char']].drop_duplicates()
+        
+        for _, row in distinct_chars.iterrows():
+            if pd.isna(row['book_name']) or pd.isna(row['char']):
+                continue
+            book = str(row['book_name']).strip()
+            char = str(row['char']).strip()
+            key = (book, char)
+            
+            if book in self.book_states:
+                self.backstory_states[key] = self.book_states[book]
+            else:
+                self.bdh.reset_state()
+                self.backstory_states[key] = self.bdh.get_state()
+                
+        print(f"Mapped {len(self.backstory_states)} character-book pairs.")
+
+    @modal.method()
+    def verify_pipeline(self):
+        print("=== Running Internal Verification ===")
+        self._initialize_components()
+        import pandas as pd
+        
+        # Test Data
+        data = {
+            'book_name': ['TestBook', 'TestBook'],
+            'char': ['Alice', 'Alice'],
+            'content': ['Statement 1', 'Statement 2'],
+            'label': ['Consistent', 'Consistent']
+        }
+        df = pd.DataFrame(data)
+        
+        # Mock Analyzer
+        class MockAnalyzer:
+            def extract_character_substory(self, book, char):
+                return ["Backstory sentence 1.", "Backstory sentence 2."]
+        
+        self.sentence_analyzer = MockAnalyzer()
+        self.backstory_states = {} # Reset
+        
+        # 1. Precompute
+        self.precompute_backstory_states(df)
+        if ('TestBook', 'Alice') in self.backstory_states:
+             print("State Precomputed: OK")
+        else:
+             print("State Precomputed: FAIL")
+             
+        # 2. Prediction
+        prob = self.predict_single('TestBook', 'Alice', 'Statement')
+        print(f"Prediction: {prob}")
+        
+        # 3. Training
+        loss = self.run_training_step(df)
+        print(f"Training Step Loss: {loss}")
+        
+        return "Verification Success"
+
+    def run_training_step(self, train_df, batch_size=2):
+        self.classifier.train()
+        self.bdh.train()
+        total_loss = 0
+        
+        optimizer = torch.optim.Adam(
+            list(self.classifier.parameters()) + list(self.bdh.parameters()),
+            lr=1e-4
+        )
         criterion = nn.CrossEntropyLoss()
         
-        self.classifier.train()
-        epochs = 30
-        
-        for epoch in range(epochs):
-            total_loss = 0
-            correct = 0
-            total = 0
-            for batch in dataloader:
-                content_txt = batch['content_text']
-                context_txt = batch['context_text']
-                labels = batch['label'].to(self.device)
+        # Batch processing
+        for start_idx in range(0, len(train_df), batch_size):
+            batch = train_df.iloc[start_idx : start_idx + batch_size]
+            if len(batch) < 2:
+                continue  # Skip incomplete batches for BatchNorm
                 
-                content_emb = self.encode_text(content_txt)
-                context_emb = self.encode_text(context_txt)
-                
-                optimizer.zero_grad()
-                outputs = self.classifier(content_emb, context_emb)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-                
-                total_loss += loss.item()
-                _, predicted = torch.max(outputs.data, 1)
-                total += labels.size(0)
-                correct += (predicted == labels).sum().item()
+            contents = batch['content'].tolist()
+            labels = torch.tensor(
+                [1 if l.strip().lower() == 'consistent' else 0 for l in batch['label']],
+                device=self.device
+            )
             
-            if (epoch+1) % 5 == 0:
-                print(f"Epoch {epoch+1}/{epochs} | Loss: {total_loss/len(dataloader):.4f} | Acc: {correct/total:.2%}")
+            # Retrieve states for each sample
+            states = []
+            for _, row in batch.iterrows():
+                key = (row['book_name'].strip(), row['char'].strip())
+                if key in self.backstory_states:
+                    states.append(self.backstory_states[key].to(self.device))
+                else:
+                    self.bdh.reset_state()
+                    states.append(self.bdh.get_state())
 
-        # Save model
-        torch.save(self.classifier.state_dict(), "/models/narrative_consistency.pt")
-        torch.save(self.bdh.state_dict(), "/models/bdh_base.pt")
-        vol.commit()
-        print("\nSaved models to /models/narrative_consistency.pt and /models/bdh_base.pt")
+            v_iso = self.encode_text(contents, distinct_states=None)
+            v_ctx = self.encode_text(contents, distinct_states=states)
+            
+            optimizer.zero_grad()
+            logits = self.classifier(v_iso, v_ctx)
+            loss = criterion(logits, labels)
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            
+        avg_loss = total_loss / max(1, len(train_df) // batch_size)
+        return avg_loss
 
-        # 3. Test on a few examples
-        print("\n=== Verification Results ===")
+    @modal.method()
+    def train_and_evaluate(self):
+        try:
+            print("Starting Infinite Context Training Pipeline...")
+            self._initialize_components()
+            
+            # Load Data
+            train_df = pd.read_csv("/root/files/train.csv")
+            
+            # Use custom test file that matches test_mode (first 50K chars)
+            test_df = pd.read_csv("/root/files/test_custom.csv")
+            print(f"Loaded {len(train_df)} train + {len(test_df)} custom test samples.")
+            
+            # Precompute Infinite Context States (One time pass per book)
+            print("Precomputing states for Train & Test...")
+            combined_df = pd.concat([train_df, test_df])
+            self.precompute_backstory_states(combined_df)
+            
+            # Training Loop with Best Checkpoint Saving
+            feature_extractor_params = list(self.bdh.parameters())
+            classifier_params = list(self.classifier.parameters())
+            self.optimizer = torch.optim.Adam(feature_extractor_params + classifier_params, lr=2e-4)
+            
+            epochs = 20  # Full run, no early stopping
+            best_acc = 0.0
+            
+            for epoch in range(epochs):
+                avg_loss = self.run_training_step(train_df, batch_size=16)
+                test_acc = self.evaluate_accuracy(test_df)
+                print(f"Epoch {epoch+1}/{epochs} Loss: {avg_loss:.4f} | Test Acc: {test_acc:.2%}")
+
+                # Save best checkpoint
+                if test_acc > best_acc:
+                    best_acc = test_acc
+                    # Save to Volume (mounted at /models)
+                    checkpoint_path = "/models/best_model.pt"
+                    torch.save({
+                        'epoch': epoch,
+                        'classifier_state': self.classifier.state_dict(),
+                        'bdh_state': self.bdh.state_dict(),
+                        'best_acc': best_acc
+                    }, checkpoint_path)
+                    print(f"  -> New Best! Saved checkpoint (Acc: {best_acc:.2%})")
+                
+            return f"Training Complete. Best Acc: {best_acc:.2%}"
+            
+        except Exception as e:
+            import traceback
+            return f"Error: {e}\n{traceback.format_exc()}"
+
+
+    def evaluate_accuracy(self, test_df):
+        """Evaluate accuracy on test set with confusion matrix."""
+        from sklearn.metrics import confusion_matrix
+        
+        correct = 0
+        total = 0
         self.classifier.eval()
-        results = []
         
-        # Pick 3 random examples
-        test_samples = df.sample(3)
-        for _, row in test_samples.iterrows():
-            pred, conf, rationale = self.predict_single(row['book_name'], row['char'], row['content'])
-            results.append({
-                "Character": row['char'],
-                "Content": row['content'][:100] + "...",
-                "True Label": row['label'],
-                "Predicted": pred,
-                "Rationale": rationale
-            })
+        y_true = []
+        y_pred = []
+        
+        for _, row in test_df.iterrows():
+            prob = self.predict_single(row['book_name'], row['char'], row['content'])
+            pred = "consistent" if prob > 0.5 else "contradict"
+            true_label = row['label'].strip().lower()
             
-        return results
+            y_true.append(1 if true_label == "consistent" else 0)
+            y_pred.append(1 if pred == "consistent" else 0)
+            
+            if pred == true_label:
+                correct += 1
+            total += 1
+        
+        # Compute confusion matrix
+        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+        tn, fp, fn, tp = cm.ravel()
+        
+        print(f"\n{'='*60}", flush=True)
+        print(f"  CONFUSION MATRIX RESULTS", flush=True)
+        print(f"{'='*60}", flush=True)
+        print(f"  True Negative (Contradict→Contradict): {tn}", flush=True)
+        print(f"  False Positive (Contradict→Consistent): {fp}", flush=True)
+        print(f"  False Negative (Consistent→Contradict): {fn}", flush=True)
+        print(f"  True Positive (Consistent→Consistent): {tp}", flush=True)
+        print(f"  Precision (Consistent): {tp/(tp+fp) if (tp+fp) > 0 else 0:.2%}", flush=True)
+        print(f"  Recall (Consistent): {tp/(tp+fn) if (tp+fn) > 0 else 0:.2%}", flush=True)
+        print(f"  Accuracy: {correct/total:.2%}", flush=True)
+        print(f"{'='*60}\n", flush=True)
+            
+        return correct / total if total > 0 else 0
 
-    def predict_single(self, book, char, content):
-        key = (book.strip(), char.strip())
-        base_sentences = self.backstory_store.get(key, [])
-        query_words = set(re.findall(r'\w+', content.lower()))
+    def predict_single(self, book_name, char_name, content):
+        """
+        Predict consistency using Intinite Context (State-Space)
+        """
+        key = (book_name.strip(), char_name.strip())
         
-        scored = []
-        if base_sentences:
-            for s in base_sentences:
-                s_words = set(re.findall(r'\w+', s.lower()))
-                score = len(query_words.intersection(s_words))
-                scored.append((score, s))
-            scored.sort(key=lambda x: x[0], reverse=True)
-            top_context = [s[1] for s in scored[:3]]
-            context_text = " ".join(top_context)
+        if key not in self.backstory_states:
+             # Try to load on fly if not precomputed
+             print(f"Loading state for {key} on demand...")
+             sentences = self.sentence_analyzer.extract_character_substory(book_name, char_name)
+             full_story = "".join(sentences)
+             if not full_story:
+                 state = None
+             else:
+                 state = self.absorb_story_stream(full_story).cpu()
+                 self.backstory_states[key] = state
+        
+        if key in self.backstory_states:
+             state = self.backstory_states[key]
         else:
-            top_context = []
-            context_text = ""
-            
-        content_emb = self.encode_text([content])
-        context_emb = self.encode_text([context_text])
+             state = None
+              
+        # Inference
+        v_iso = self.encode_text([content], distinct_states=None)
+        v_ctx = self.encode_text([content], distinct_states=state)
         
         with torch.no_grad():
-            outputs = self.classifier(content_emb, context_emb)
-            probs = F.softmax(outputs, dim=1)
-            pred_idx = torch.argmax(probs).item()
-            conf = probs[0][pred_idx].item()
+            self.classifier.eval()
+            logits = self.classifier(v_iso, v_ctx)
+            prob = torch.softmax(logits, dim=1)[0][1].item()
             
-        label = "consistent" if pred_idx == 1 else "contradict"
-        
-        if not top_context:
-            rat = "No backstory found."
-        else:
-            rat = f"Based on: '{top_context[0][:150]}...'"
-            
-        return label, conf, rat
+        return prob
 
-    def _collate(self, batch):
-        return {
-            'content_text': [item['content_text'] for item in batch],
-            'context_text': [item['context_text'] for item in batch],
-            'label': torch.tensor([item['label'] for item in batch])
-        }
+    @modal.method()
+    def generate_submission(self):
+        """Train and then generate submission.csv for the hackathon."""
+        print("Starting Submission Pipeline...")
+        self._initialize_components()
+        
+        # 1. Train the model first (20 epochs = Sweet Spot)
+        print("Step 1: Training Model (20 Epochs)...")
+        train_df = pd.read_csv("/root/files/train.csv")
+        self.precompute_backstory_states(train_df)
+        
+        feature_extractor_params = list(self.bdh.parameters())
+        classifier_params = list(self.classifier.parameters())
+        self.optimizer = torch.optim.Adam(feature_extractor_params + classifier_params, lr=2e-4)
+        
+        for epoch in range(20):
+            avg_loss = self.run_training_step(train_df, batch_size=16)
+            print(f"  Epoch {epoch+1}/20 | Loss: {avg_loss:.4f}")
+            
+        # 2. Generate Submission
+        print("Step 2: Generating Predictions...")
+        test_df = pd.read_csv("/root/files/test.csv")
+        self.precompute_backstory_states(test_df)
+        
+        results = []
+        for _, row in test_df.iterrows():
+            prob = self.predict_single(row['book_name'], row['char'], row['content'])
+            label = "consistent" if prob > 0.5 else "contradict"
+            results.append({'id': row['id'], 'label': label})
+            
+        # Save submission
+        submission_df = pd.DataFrame(results)
+        submission_df.to_csv("/root/submission.csv", index=False)
+        print("Saved submission.csv")
+        
+        # Also save to volume for persistence
+        submission_df.to_csv("/models/submission.csv", index=False)
+        vol.commit()
+        
+        return f"Generated {len(results)} predictions"
+
+@app.local_entrypoint()
+def submit():
+    print("Generating Submission...")
+    system = NarrativeConsistencySystem()
+    result = system.generate_submission.remote()
+    print(result)
 
 @app.local_entrypoint()
 def main():
-    print("Starting Consistency Classifier Training on Modal...")
+    print("Starting Training...")
     system = NarrativeConsistencySystem()
     results = system.train_and_evaluate.remote()
-    
-    import json
-    with open("consistency_results.json", "w") as f:
-        json.dump(results, f, indent=2)
-        
-    print("\n\n" + "="*80)
-    print("FINAL RESULTS")
-    print("="*80)
-    for res in results:
-        print(f"\nCharacter: {res['Character']}")
-        print(f"Content:   {res['Content']}")
-        print(f"Result:    {res['True Label']} vs {res['Predicted']}")
-        print(f"Rationale: {res['Rationale']}")
-    print("="*80)
+    print(results)

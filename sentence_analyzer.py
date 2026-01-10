@@ -7,13 +7,8 @@ from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 
 from data_utils import NarrativeDocument, Sentence
-try:
-    from torch_geometric.data import Data, Batch
-    from temporal_causal_gnn import TemporalCausalGNN
-    HAS_GNN = True
-except ImportError:
-    HAS_GNN = False
-    print("Warning: Torch Geometric not found per sentence_analyzer, GNN features disabled.")
+
+# GNN removed - using Pure Infinite Context architecture
 
 
 @dataclass
@@ -49,7 +44,7 @@ class CoherenceClassifier(nn.Module):
     def __init__(self, input_dim, device):
         super().__init__()
         self.device = device
-        self.use_gnn = HAS_GNN
+        self.use_gnn = False  # GNN removed
         
         if self.use_gnn:
             self.gnn = TemporalCausalGNN(d_model=input_dim, n_heads=4, dropout=0.1)
@@ -280,6 +275,44 @@ class SentenceAnalyzer(nn.Module):
             dropout=0.1,
             batch_first=True
         ).to(device)
+        
+        # Book paths for character extraction
+        self.book_paths = {
+            "The Count of Monte Cristo": "/root/files/The Count of Monte Cristo.txt",
+            "In Search of the Castaways": "/root/files/In search of the castaways.txt"
+        }
+
+    def extract_character_substory(self, book_name: str, char_name: str) -> List[str]:
+        """
+        Extract all sentences mentioning a character from a book.
+        Returns list of sentence strings.
+        """
+        import re
+        
+        # Normalize book name
+        book_path = self.book_paths.get(book_name)
+        if not book_path:
+            print(f"Warning: Unknown book '{book_name}'")
+            return []
+            
+        try:
+            with open(book_path, 'r', encoding='utf-8') as f:
+                text = f.read()
+        except FileNotFoundError:
+            print(f"Warning: Book file not found: {book_path}")
+            return []
+            
+        # Split into sentences
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        # Filter by character mention (handle aliases like "Tom Ayrton/Ben Joyce")
+        aliases = [a.strip() for a in char_name.split('/')]
+        relevant = []
+        for sent in sentences:
+            if any(alias in sent for alias in aliases):
+                relevant.append(sent)
+                
+        return relevant
     
     def encode_sentence(self, sentence: Sentence) -> torch.Tensor:
         """Encode a single sentence using BDH."""
