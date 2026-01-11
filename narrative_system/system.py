@@ -68,7 +68,13 @@ class NarrativeConsistencySystem:
         # Re-import BDH config to be sure
         from bdh import BDH, BDHConfig
         
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if torch.cuda.is_available():
+            self.device = torch.device('cuda')
+            print(f"✅ CUDA Available: {torch.cuda.get_device_name(0)}")
+        else:
+            self.device = torch.device('cpu')
+            print("⚠️ CUDA NOT available. Using CPU.")
+        
         print(f"Initialized on {self.device}")
         
         self.config = BDHConfig(n_layer=6, n_embd=EMBEDDING_DIM, n_head=4)
