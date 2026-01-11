@@ -89,6 +89,7 @@ class WorldState:
 
 class EntityWriteGate(nn.Module):
     """
+    Distinguish the noise from the signal
     Entity Write Gating (Scalar, Dimension-Reduced).
     
     Controls how much new information overwrites entity state.
