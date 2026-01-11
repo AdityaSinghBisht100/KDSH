@@ -8,6 +8,7 @@ import os
 
 from pathlib import Path
 from typing import List, Dict, Tuple
+from tqdm import tqdm
 
 # Internal imports from the package
 from .world_state import WorldState, EntityWriteGate, AdaptiveMerge
@@ -284,45 +285,52 @@ class NarrativeConsistencySystem:
         
         current_time = 0.0
         
+        # Calculate total chunks for progress bar
+        total_chunks = (len(text) + chunk_size - 1) // chunk_size
+        
         with torch.no_grad():
-            for i in range(0, len(text), chunk_size):
-                chunk = text[i : i + chunk_size]
-                tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=self.device)
-                if tokens.size(1) == 0:
-                    continue
-                
-                current_time += 1.0
-                
-                self.bdh.reset_state()
-                self.bdh.set_state(global_state.detach().clone().to(self.device))
-                self.bdh(tokens, use_state=True)
-                global_state = self.bdh.get_state().cpu()
-                global_timestamp = current_time
-                
-                chunk_lower = chunk.lower()
-                mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
-                chunk_emb = global_state
-                
-                for entity in mentioned_entities:
-                    old_state = entity_states[entity].detach().clone()
+            with tqdm(total=total_chunks, desc="  Processing Chunks", unit="chunk", leave=False) as pbar:
+                for i in range(0, len(text), chunk_size):
+                    chunk = text[i : i + chunk_size]
+                    tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=self.device)
+                    if tokens.size(1) == 0:
+                        pbar.update(1)
+                        continue
+                    
+                    current_time += 1.0
                     
                     self.bdh.reset_state()
-                    self.bdh.set_state(old_state.to(self.device))
+                    self.bdh.set_state(global_state.detach().clone().to(self.device))
                     self.bdh(tokens, use_state=True)
-                    new_state = self.bdh.get_state().cpu()
+                    global_state = self.bdh.get_state().cpu()
+                    global_timestamp = current_time
                     
-                    gate = write_gate(
-                        old_state.to(self.device), 
-                        chunk_emb.to(self.device), 
-                        global_state.to(self.device)
-                    ).item()
+                    chunk_lower = chunk.lower()
+                    mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
+                    chunk_emb = global_state
                     
-                    update = new_state - old_state
-                    entity_states[entity] = old_state + gate * update
-                    entity_timestamps[entity] = current_time
+                    for entity in mentioned_entities:
+                        old_state = entity_states[entity].detach().clone()
+                        
+                        self.bdh.reset_state()
+                        self.bdh.set_state(old_state.to(self.device))
+                        self.bdh(tokens, use_state=True)
+                        new_state = self.bdh.get_state().cpu()
+                        
+                        gate = write_gate(
+                            old_state.to(self.device), 
+                            chunk_emb.to(self.device), 
+                            global_state.to(self.device)
+                        ).item()
+                        
+                        update = new_state - old_state
+                        entity_states[entity] = old_state + gate * update
+                        entity_timestamps[entity] = current_time
+                        
+                        entity_update_counts[entity] += 1
+                        gate_values[entity].append(gate)
                     
-                    entity_update_counts[entity] += 1
-                    gate_values[entity].append(gate)
+                    pbar.update(1)
         
         world_state = WorldState(
             global_state=global_state.detach(),
@@ -424,9 +432,15 @@ class NarrativeConsistencySystem:
         )
         criterion = nn.CrossEntropyLoss()
         
+        # Progress bar for training batches
+        num_batches = (len(train_df) + batch_size - 1) // batch_size
+        pbar = tqdm(total=num_batches, desc="Training Batches", unit="batch", leave=False)
+        
         for start_idx in range(0, len(train_df), batch_size):
             batch = train_df.iloc[start_idx : start_idx + batch_size]
-            if len(batch) < 2: continue
+            if len(batch) < 2: 
+                pbar.update(1)
+                continue
             
             contents = batch['content'].tolist()
             labels = torch.tensor(
@@ -456,7 +470,10 @@ class NarrativeConsistencySystem:
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+            pbar.update(1)
+            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
             
+        pbar.close()
         return total_loss / max(1, len(train_df) // batch_size)
 
     def predict_single(self, book_name, char_name, content):

@@ -7,3 +7,4 @@ transformers>=4.30.0
 modal>=0.50.0 
 pytest
 pdf2image # Added just in case you do need pathway elsewhere
+tqdm
