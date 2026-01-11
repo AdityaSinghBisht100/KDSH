@@ -160,6 +160,7 @@ class AdaptiveMerge(nn.Module):
                 entity_state: torch.Tensor) -> torch.Tensor:
         """
         Returns merged state with learned alpha.
+        Bugfix #4: Alpha clamped to [0.05, 0.95] to prevent saturation.
         """
         stmt_summary = self.get_summary(statement_emb) if statement_emb is not None else torch.zeros(self.proj_dim, device=global_state.device)
         global_summary = self.get_summary(global_state)
@@ -167,6 +168,9 @@ class AdaptiveMerge(nn.Module):
         
         alpha_input = torch.cat([stmt_summary, global_summary, entity_summary], dim=-1)
         alpha = self.alpha_mlp(alpha_input.unsqueeze(0)).squeeze()
+        
+        # Bugfix #4: Clamp alpha to preserve gradient flow
+        alpha = torch.clamp(alpha, 0.05, 0.95)
         
         return alpha * global_state + (1 - alpha) * entity_state
 
@@ -955,10 +959,14 @@ class NarrativeConsistencySystem:
                 # Get entity state and timestamp
                 if char_name in ws.entity_states:
                     entity_state = ws.entity_states[char_name]
-                    fact_time = ws.entity_timestamps.get(char_name, 0.0) if hasattr(ws, 'entity_timestamps') else 0.0
+                    entity_ts = ws.entity_timestamps.get(char_name, 0.0) if hasattr(ws, 'entity_timestamps') else 0.0
                 else:
                     entity_state = ws.global_state
-                    fact_time = ws.global_timestamp if hasattr(ws, 'global_timestamp') else 0.0
+                    entity_ts = 0.0
+                
+                # Bugfix #1: fact_time = max(entity_timestamp, global_timestamp)
+                global_ts = ws.global_timestamp if hasattr(ws, 'global_timestamp') else 0.0
+                fact_time = max(entity_ts, global_ts)
                 
                 # Use AdaptiveMerge instead of fixed 0.3/0.7
                 # For now, encode statement as simple embedding proxy
@@ -1001,26 +1009,30 @@ class NarrativeConsistencySystem:
         checker = CounterfactualChecker(self.bdh, self.device)
         negated = checker.negate(content)
         
-        # Compute surprise with temporal decay (Review Fix #5)
-        surprise_S = checker.compute_surprise(content, state, fact_time=fact_time, query_time=query_time)
-        surprise_negS = checker.compute_surprise(negated, state, fact_time=fact_time, query_time=query_time)
+        # Compute surprise (energy) with temporal decay
+        E_S = checker.compute_surprise(content, state, fact_time=fact_time, query_time=query_time)
+        E_negS = checker.compute_surprise(negated, state, fact_time=fact_time, query_time=query_time)
         
-        # Decision logic
+        # Bugfix #5: Log-energy comparison (numerically stable and symmetric)
         epsilon = 1e-8
-        conflict_ratio = surprise_S / (surprise_negS + epsilon)
+        log_ratio = math.log(E_S + epsilon) - math.log(E_negS + epsilon)
         
-        if conflict_ratio > 1.0:
+        if log_ratio > 0:
+            # Statement has higher energy → resisted by world → CONTRADICT
             prediction = "contradict"
-            confidence = conflict_ratio
+            confidence = abs(log_ratio)
         else:
+            # Negation has higher energy → statement accepted → CONSISTENT
             prediction = "consistent"
-            confidence = 1.0 / (conflict_ratio + epsilon)
+            confidence = abs(log_ratio)
         
         # Return probability (0 = contradict, 1 = consistent)
+        # Use sigmoid-like scaling for smoother output
+        prob_offset = min(confidence * 0.1, 0.4)  # Cap offset at 0.4
         if prediction == "consistent":
-            return min(0.5 + confidence * 0.05, 1.0)  # Reduced scaling for stability
+            return 0.5 + prob_offset
         else:
-            return max(0.5 - confidence * 0.05, 0.0)  # Reduced scaling for stability
+            return 0.5 - prob_offset
 
     @modal.method()
     def generate_submission(self):
