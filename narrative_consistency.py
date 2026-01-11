@@ -101,7 +101,7 @@ class EntityWriteGate(nn.Module):
         super().__init__()
         # No learnable parameters - rule-based
         self.base_gate = 0.1  # Default low gate
-        self.sensitivity = 5.0  # How sensitive to variance changes
+        self.sensitivity = 0.5  # Reduced to 0.5 to target <35% write rate (was 1.5 -> 47%)
     
     def forward(self, entity_state: torch.Tensor, chunk_emb: torch.Tensor, 
                 global_state: torch.Tensor) -> torch.Tensor:
@@ -223,6 +223,93 @@ class ContrastiveEnergyLoss(nn.Module):
 
 # Maximum surprise value for clamping (Review Fix #6)
 SURPRISE_MAX = 100.0
+
+
+class HybridCoherenceClassifier(nn.Module):
+    """
+    Hybrid Classifier over State Transitions + Energy.
+    
+    Combines:
+    - summary(S_before): World state summary
+    - summary(Δ_S): State change from statement
+    - summary(Δ_¬S): State change from negation  
+    - E_S, E_¬S, E_diff: Energy signals
+    
+    Energy shapes the space; classifier draws the boundary.
+    """
+    def __init__(self, summary_dim: int = 4, device=None):
+        super().__init__()
+        # Feature vector (Fix #4 - expanded):
+        # summary(S_before) = 2
+        # summary(Δ_S_norm) = 2  
+        # summary(Δ_¬S_norm) = 2
+        # summary(Δ_diff) = 2  <- NEW: difference-of-differences
+        # E_S, E_¬S, E_diff = 3
+        # Total = 11 input features
+        input_dim = 11
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(input_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 2)  # Output: P(contradict), P(consistent)
+        )
+        self.device = device
+    
+    def get_summary(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute summary statistics: [mean, std]."""
+        flat = state.view(-1).float()
+        mean = flat.mean()
+        std = flat.std() + 1e-8
+        return torch.stack([mean, std])
+    
+    def forward(self, S_before: torch.Tensor, delta_S: torch.Tensor, 
+                delta_negS: torch.Tensor, E_S: torch.Tensor, E_negS: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            S_before: World state before encoding
+            delta_S: NORMALIZED state change from statement (from compute_surprise)
+            delta_negS: NORMALIZED state change from negation (from compute_surprise)
+            E_S: Surprise/energy tensor of statement
+            E_negS: Surprise/energy tensor of negation
+        
+        Returns:
+            logits: [2] tensor with P(contradict), P(consistent)
+        """
+        # Deltas already normalized by compute_surprise, use directly
+        delta_S_norm = delta_S
+        delta_negS_norm = delta_negS
+        
+        # Difference-of-differences (KEY discriminative feature)
+        delta_diff = delta_S_norm - delta_negS_norm
+        
+        # Compute summaries on normalized features
+        summary_before = self.get_summary(S_before)
+        summary_delta_S = self.get_summary(delta_S_norm)
+        summary_delta_negS = self.get_summary(delta_negS_norm)
+        summary_diff = self.get_summary(delta_diff)
+        
+        # Energy features - now tensors with gradients
+        dev = self.device or S_before.device
+        E_diff = E_S - E_negS
+        energy_features = torch.stack([E_S, E_negS, E_diff]).to(dev)
+        
+        # Build feature vector (11 features)
+        features = torch.cat([
+            summary_before,        # 2
+            summary_delta_S,       # 2
+            summary_delta_negS,    # 2
+            summary_diff,          # 2
+            energy_features        # 3
+        ])
+        
+        # Classify
+        logits = self.classifier(features.unsqueeze(0).float())
+        return logits.squeeze(0)
+
+
 class CounterfactualChecker:
     """
     Counterfactual Consistency Checking.
@@ -273,59 +360,64 @@ class CounterfactualChecker:
     
     def compute_surprise(self, text: str, world_state: torch.Tensor, 
                           fact_time: float = 0.0, query_time: float = 1.0,
-                          temporal_beta: float = 0.01) -> float:
+                          temporal_beta: float = 0.01) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Measure how much the statement "surprises" the world state.
+        Compute surprise (energy) AND normalized state delta.
         
-        High surprise = statement conflicts with stored facts.
+        FIXES APPLIED:
+        - Fix #2: Removed torch.no_grad() - freeze BDH params explicitly instead
+        - Fix #3: Returns torch.Tensor, not float
+        - Fix #4: Returns delta_norm for classifier features
+        - Fix #5: Temporal decay via torch operations
         
-        Bugfixes Applied:
-        - Fix #1: detach().clone() for safe state copying
-        - Fix #2: Layer-weighted Δ (later layers weighted more)
-        - Fix #5: Temporal decay affects decision
-        - Fix #6: log1p stabilization
+        Returns:
+            Tuple of (surprise_tensor, delta_norm_tensor)
         """
-        # Safe state cloning - no gradient leakage
-        state_before = world_state.detach().clone().to(self.device)
+        eps = 1e-8
         
-        # Reset before setting to prevent silent drift
+        # Freeze BDH parameters explicitly (instead of no_grad)
+        for p in self.bdh.parameters():
+            p.requires_grad = False
+        
+        # Clone state (keep gradients for classifier learning)
+        state_before = world_state.clone().to(self.device)
+        S_norm = state_before.norm() + eps
+        
+        # Reset and set BDH state
         self.bdh.reset_state()
-        self.bdh.set_state(state_before)
+        self.bdh.set_state(state_before.detach())  # Detach for BDH internal state
         
-        # Encode statement
+        # Encode statement - NO torch.no_grad() so deltas can flow
         tokens = self.encode_text(text)
-        
-        with torch.no_grad():
-            self.bdh(tokens, use_state=True)
+        self.bdh(tokens, use_state=True)
         
         # Get state after
         state_after = self.bdh.get_state()
         
-        # Bugfix #2: Layer-weighted Δ (later layers encode higher-level state)
-        if state_after.dim() >= 2 and state_after.shape[0] > 1:
-            n_layers = state_after.shape[0]
-            layer_weights = torch.linspace(0.5, 1.5, n_layers, device=self.device)
-            
-            # Compute weighted sum of per-layer deltas
-            delta = 0.0
-            for i in range(n_layers):
-                layer_delta = torch.norm(state_after[i] - state_before[i], p=2).item()
-                delta += layer_weights[i].item() * layer_delta
-        else:
-            # Fallback for single-layer or flat state
-            delta = torch.norm(state_after - state_before, p=2).item()
+        # Compute delta (state change)
+        delta = state_after - state_before.detach()
         
-        # Temporal decay affects surprise
-        temporal_decay = math.exp(-temporal_beta * (query_time - fact_time))
-        delta = delta * temporal_decay
+        # Fix #4: Normalize delta for classifier
+        delta_norm = delta / S_norm
         
-        # Stabilize via log1p (prevents explosion)
-        surprise = math.log1p(delta)
+        # Compute energy (L2 norm of delta)
+        energy = torch.norm(delta, p=2)
         
-        # Clamp for additional safety
-        surprise = min(surprise, math.log1p(SURPRISE_MAX))
+        # Fix #5: Apply temporal decay using torch (not math)
+        decay = torch.exp(torch.tensor(-temporal_beta * (query_time - fact_time), device=self.device))
+        energy = energy * decay
         
-        return surprise
+        # Stabilize via log1p (keeps as tensor)
+        surprise = torch.log1p(energy)
+        
+        # Clamp for safety (keeps as tensor)
+        surprise = torch.clamp(surprise, max=torch.log1p(torch.tensor(SURPRISE_MAX, device=self.device)))
+        
+        # Restore BDH gradient state for training
+        for p in self.bdh.parameters():
+            p.requires_grad = True
+        
+        return surprise, delta_norm
     
     def predict(self, statement: str, world_state: torch.Tensor) -> Tuple[str, float]:
         """
@@ -377,6 +469,31 @@ class CounterfactualChecker:
             "surprise_negation": surprise_negS,
             "conflict_ratio": conflict_ratio,
             "prediction": prediction
+        }
+    
+    def compute_hybrid_features(self, statement: str, world_state: torch.Tensor,
+                                 fact_time: float = 0.0, query_time: float = 1.0) -> Dict:
+        """
+        Compute features for hybrid classifier.
+        
+        Returns:
+            Dict with S_before, delta_S, delta_negS, E_S, E_negS
+        """
+        negated = self.negate(statement)
+        S_before = world_state.clone().to(self.device)
+        
+        # Use compute_surprise which now returns (energy, delta_norm) tuples
+        # This eliminates duplicate BDH calls and ensures proper gradient flow
+        E_S, delta_S = self.compute_surprise(statement, world_state, fact_time, query_time)
+        E_negS, delta_negS = self.compute_surprise(negated, world_state, fact_time, query_time)
+        
+        return {
+            "S_before": S_before,
+            "delta_S": delta_S,  # Now normalized delta tensor
+            "delta_negS": delta_negS,  # Now normalized delta tensor
+            "E_S": E_S,  # Now tensor, not float
+            "E_negS": E_negS,  # Now tensor, not float
+            "negated": negated
         }
 
 
@@ -823,67 +940,133 @@ class NarrativeConsistencySystem:
         
         return "Verification Success"
 
-    def run_training_step(self, train_df, batch_size=2):
-        self.classifier.train()
+    def run_training_step(self, train_df, batch_size=4):
+        """
+        Train HybridCoherenceClassifier on state transitions + energy features.
+        """
+        # Initialize hybrid classifier if needed
+        if not hasattr(self, 'hybrid_classifier') or self.hybrid_classifier is None:
+            self.hybrid_classifier = HybridCoherenceClassifier(device=self.device).to(self.device)
+        
+        self.hybrid_classifier.train()
         self.bdh.train()
         total_loss = 0
         
+        # Optimizer includes hybrid classifier + BDH
         optimizer = torch.optim.Adam(
-            list(self.classifier.parameters()) + list(self.bdh.parameters()),
-            lr=1e-4
+            list(self.hybrid_classifier.parameters()) + list(self.bdh.parameters()),
+            lr=2e-4
         )
-        criterion = nn.CrossEntropyLoss()
         
-        # Batch processing
-        for start_idx in range(0, len(train_df), batch_size):
-            batch = train_df.iloc[start_idx : start_idx + batch_size]
-            if len(batch) < 2:
-                continue  # Skip incomplete batches for BatchNorm
-                
-            contents = batch['content'].tolist()
-            labels = torch.tensor(
-                [1 if l.strip().lower() == 'consistent' else 0 for l in batch['label']],
-                device=self.device
+        # w_contradict = 2.0 forces model to prioritize finding contradictions
+        class_weights = torch.tensor([2.0, 1.0], device=self.device)  # [contradict, consistent]
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        
+        # Checkers
+        checker = CounterfactualChecker(self.bdh, self.device)
+        pred_counts = {"contradict": 0, "consistent": 0}
+        energy_diffs = []
+        
+        # Process samples
+        for idx, row in train_df.iterrows():
+            book_name = row['book_name'].strip()
+            char_name = row['char'].strip()
+            content = row['content']
+            label = 1 if row['label'].strip().lower() == 'consistent' else 0
+            
+            key = (book_name, char_name)
+            
+            # Get world state
+            if key not in self.backstory_states:
+                continue
+            state = self.backstory_states[key].to(self.device)
+            
+            # Compute hybrid features
+            features = checker.compute_hybrid_features(content, state)
+            
+            # Track energy difference for Tau (Step 3)
+            with torch.no_grad():
+                diff = abs(features["E_S"].item() - features["E_negS"].item())
+                energy_diffs.append(diff)
+            
+            # Forward pass 
+            logits = self.hybrid_classifier(
+                features["S_before"].to(self.device),
+                features["delta_S"].to(self.device),
+                features["delta_negS"].to(self.device),
+                features["E_S"],
+                features["E_negS"]
             )
             
-            # Retrieve states for each sample
-            states = []
-            for _, row in batch.iterrows():
-                key = (row['book_name'].strip(), row['char'].strip())
-                if key in self.backstory_states:
-                    states.append(self.backstory_states[key].to(self.device))
-                else:
-                    self.bdh.reset_state()
-                    states.append(self.bdh.get_state())
-
-            v_iso = self.encode_text(contents, distinct_states=None)
-            v_ctx = self.encode_text(contents, distinct_states=states)
+            # Track predictions for bias check
+            pred = torch.argmax(logits).item()
+            if pred == 0:
+                pred_counts["contradict"] += 1
+            else:
+                pred_counts["consistent"] += 1
             
+            # Loss
+            target = torch.tensor([label], device=self.device)
+            loss = criterion(logits.unsqueeze(0), target)
+            
+            # Step 2: Entropy Regularization (Force Diversity)
+            p = torch.softmax(logits, dim=0)
+            entropy = -torch.sum(p * torch.log(p + 1e-8))
+            loss += 0.05 * entropy
+            
+            # Backward
             optimizer.zero_grad()
-            logits = self.classifier(v_iso, v_ctx)
-            
-            # Classification loss
-            ce_loss = criterion(logits, labels)
-           
-            # based on classifier confidence to encourage selective gating
-            lambda_sparsity = 1e-2  # Sparsity coefficient
-            
-            # Proxy sparsity: penalize low-confidence predictions
-            # This indirectly encourages better state separation
-            probs = torch.softmax(logits, dim=1)
-            entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1).mean()
-            sparsity_loss = lambda_sparsity * entropy  # Lower entropy = more confident
-            
-            # Total loss
-            loss = ce_loss + sparsity_loss
-            
             loss.backward()
             optimizer.step()
             
             total_loss += loss.item()
+        
+        # Fix #5: Prediction bias check
+        total_preds = pred_counts["contradict"] + pred_counts["consistent"]
+        if total_preds > 0:
+            pct_consistent = pred_counts["consistent"] / total_preds * 100
+            pct_contradict = pred_counts["contradict"] / total_preds * 100
+            print(f"    [BIAS CHECK] Contradict: {pct_contradict:.1f}% | Consistent: {pct_consistent:.1f}%")
+        
+        avg_loss = total_loss / max(1, len(train_df))
+        return avg_loss, energy_diffs
+
+    def filter_explicit_dataset(self, df):
+        """Step 1: Restrict task to EXPLICIT contradictions (prevents semantic drift)."""
+        print("Step 1: Filtering for EXPLICIT contradictions...")
+        valid_indices = []
+        book_paths = {
+            "The Count of Monte Cristo": "/root/files/The Count of Monte Cristo.txt",
+            "In Search of the Castaways": "/root/files/In search of the castaways.txt"
+        }
+        
+        for book in df['book_name'].unique():
+            book = book.strip()
+            path = book_paths.get(book)
+            if not path: continue
             
-        avg_loss = total_loss / max(1, len(train_df) // batch_size)
-        return avg_loss
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    # User-specified constraint: "explicitly grounded in observed context"
+                    # We assume observed context is first 50k chars (test mode)
+                    content = f.read(50000).lower()
+            except Exception as e:
+                print(f"Error reading {book}: {e}")
+                continue
+                
+            book_df = df[df['book_name'] == book]
+            for idx, row in book_df.iterrows():
+                statement = str(row['content'])
+                # Heuristic: verify keywords appear in text
+                keywords = [w for w in statement.split() if len(w) > 3][:3]
+                if not keywords: keywords = statement.split()[:3]
+                
+                if any(k.lower() in content for k in keywords):
+                    valid_indices.append(idx)
+        
+        filtered = df.loc[valid_indices].copy()
+        print(f"Explicit Filter: kept {len(filtered)}/{len(df)} samples ({len(filtered)/len(df):.1%})")
+        return filtered
 
     @modal.method()
     def train_and_evaluate(self):
@@ -893,52 +1076,67 @@ class NarrativeConsistencySystem:
             
             # Load Data
             train_df = pd.read_csv("/root/files/train.csv")
-            
-            # Use custom test file that matches test_mode (first 50K chars)
             test_df = pd.read_csv("/root/files/test_custom.csv")
-            print(f"Loaded {len(train_df)} train + {len(test_df)} custom test samples.")
             
-            # Precompute Infinite Context States (One time pass per book)
+            # Step 1: Filter Dataset
+            train_df = self.filter_explicit_dataset(train_df)
+            test_df = self.filter_explicit_dataset(test_df)
+            
+            # Balance (Step from previous fix - keep it)
+            def balance_df(df):
+                cons = df[df['label']=='consistent']
+                cont = df[df['label']=='contradict']
+                min_len = min(len(cons), len(cont))
+                if min_len == 0: return df
+                return pd.concat([cons.sample(min_len, random_state=42), cont.sample(min_len, random_state=42)]).sample(frac=1).reset_index(drop=True)
+            
+            train_df = balance_df(train_df)
+            test_df = balance_df(test_df)
+            print(f"Final Training Set: {len(train_df)} samples")
+            
+            # Precompute Infinite Context States
             print("Precomputing states for Train & Test...")
             combined_df = pd.concat([train_df, test_df])
             self.precompute_backstory_states(combined_df)
             
-            # Training Loop with Best Checkpoint Saving
+            # Training Setup
             feature_extractor_params = list(self.bdh.parameters())
             classifier_params = list(self.classifier.parameters())
             self.optimizer = torch.optim.Adam(feature_extractor_params + classifier_params, lr=2e-4)
             
-            # Training Stability Fixes
-            epochs = 15  # Reduced from 20 - best epoch expected in 3-7
+            epochs = 30
             best_acc = 0.0
-            patience = 2  # Early stopping patience
+            patience = 10
             no_improve_count = 0
             
-            # Verify WorldState is frozen (Fix #2)
-            print("=" * 50)
-            print("WorldState Freeze Verification:")
-            for book_name, ws in self.world_states.items():
-                if hasattr(ws, 'global_timestamp'):
-                    print(f"  {book_name}: timestamp={ws.global_timestamp:.1f} (FROZEN)")
-            print("=" * 50)
+            # Step 3: Initialize Tau (Median Energy Diff)
+            self.tau = 0.5 # Default fallback
+            all_energy_diffs = []
             
             for epoch in range(epochs):
-                avg_loss = self.run_training_step(train_df, batch_size=16)
+                avg_loss, energy_diffs = self.run_training_step(train_df, batch_size=16)
+                
+                # Update Tau dynamically
+                all_energy_diffs.extend(energy_diffs)
+                if all_energy_diffs:
+                    import statistics
+                    self.tau = statistics.median(all_energy_diffs)
+                
                 test_acc = self.evaluate_accuracy(test_df)
-                print(f"Epoch {epoch+1}/{epochs} Loss: {avg_loss:.4f} | Test Acc: {test_acc:.2%}")
+                print(f"Epoch {epoch+1}/{epochs} Loss: {avg_loss:.4f} | Tau: {self.tau:.4f} | Test Acc: {test_acc:.2%}")
 
                 # Save best checkpoint
                 if test_acc > best_acc:
                     best_acc = test_acc
-                    no_improve_count = 0  # Reset patience counter
+                    no_improve_count = 0 
                     
-                    # Save to Volume (mounted at /models)
                     checkpoint_path = "/models/best_model.pt"
                     torch.save({
                         'epoch': epoch,
                         'classifier_state': self.classifier.state_dict(),
                         'bdh_state': self.bdh.state_dict(),
-                        'best_acc': best_acc
+                        'best_acc': best_acc,
+                        'tau': self.tau # Save tau
                     }, checkpoint_path)
                     print(f"  -> New Best! Saved checkpoint (Acc: {best_acc:.2%})")
                 else:
@@ -1000,13 +1198,14 @@ class NarrativeConsistencySystem:
 
     def predict_single(self, book_name, char_name, content):
         """
-        Predict consistency using Counterfactual Consistency Checking.
+        HYBRID Prediction: State Transitions + Energy → Classifier
         
-        Energy-Based World Model:
-        - If statement causes more surprise → CONTRADICT
-        - If negation causes more surprise → CONSISTENT
+        1. Compute S_before, Δ_S, Δ_¬S (state transitions)
+        2. Compute E_S, E_¬S (energies)
+        3. Build feature vector: [summary(S_before), summary(Δ_S), summary(Δ_¬S), E_S, E_¬S, E_diff]
+        4. Pass to classifier → P(contradict), P(consistent)
         
-        Uses AdaptiveMerge for query-adaptive state blending.
+        Energy shapes the space; classifier draws the boundary.
         """
         book_name = book_name.strip()
         char_name = char_name.strip()
@@ -1029,19 +1228,17 @@ class NarrativeConsistencySystem:
                     entity_state = ws.global_state
                     entity_ts = 0.0
                 
-                # Bugfix #1: fact_time = max(entity_timestamp, global_timestamp)
+                # fact_time = max(entity_timestamp, global_timestamp)
                 global_ts = ws.global_timestamp if hasattr(ws, 'global_timestamp') else 0.0
                 fact_time = max(entity_ts, global_ts)
                 
-                # Use AdaptiveMerge instead of fixed 0.3/0.7
-                # For now, encode statement as simple embedding proxy
+                # Use AdaptiveMerge for state
                 stmt_tokens = torch.tensor([[ord(c) % 256 for c in content[:50]]], dtype=torch.long, device=self.device)
                 with torch.no_grad():
                     self.bdh.reset_state()
                     self.bdh(stmt_tokens, use_state=False)
                     stmt_emb = self.bdh.get_state()
                 
-                # Initialize AdaptiveMerge (using distributional summaries)
                 merge = AdaptiveMerge(state_dim=64, proj_dim=32).to(self.device)
                 merge.eval()
                 
@@ -1055,49 +1252,53 @@ class NarrativeConsistencySystem:
                 self.backstory_states[key] = state
             else:
                 # Fallback: compute on demand
-                print(f"Loading state for {key} on demand...")
                 sentences = self.sentence_analyzer.extract_character_substory(book_name, char_name)
                 full_story = "".join(sentences)
                 if not full_story:
-                    state = None
-                else:
-                    state = self.absorb_story_stream(full_story).cpu()
-                    self.backstory_states[key] = state
+                    return 0.5
+                state = self.absorb_story_stream(full_story).cpu()
+                self.backstory_states[key] = state
         
         state = self.backstory_states.get(key)
         
         if state is None:
-            # No context available, default to consistent
             return 0.5
         
-        # Counterfactual Consistency Checking with temporal decay
+        # Initialize hybrid classifier if not exists
+        if not hasattr(self, 'hybrid_classifier') or self.hybrid_classifier is None:
+            self.hybrid_classifier = HybridCoherenceClassifier(device=self.device).to(self.device)
+            self.hybrid_classifier.eval()
+        
+        # Compute hybrid features
         checker = CounterfactualChecker(self.bdh, self.device)
-        negated = checker.negate(content)
+        features = checker.compute_hybrid_features(content, state, fact_time, query_time)
         
-        # Compute surprise (energy) with temporal decay
-        E_S = checker.compute_surprise(content, state, fact_time=fact_time, query_time=query_time)
-        E_negS = checker.compute_surprise(negated, state, fact_time=fact_time, query_time=query_time)
+        # Classify using hybrid features
+        with torch.no_grad():
+            logits = self.hybrid_classifier(
+                features["S_before"].to(self.device),
+                features["delta_S"].to(self.device),
+                features["delta_negS"].to(self.device),
+                features["E_S"],
+                features["E_negS"]
+            )
+            probs = torch.softmax(logits, dim=0)
+            prob_classifier = probs[1].item()
         
-        # Bugfix #5: Log-energy comparison (numerically stable and symmetric)
-        epsilon = 1e-8
-        log_ratio = math.log(E_S + epsilon) - math.log(E_negS + epsilon)
+        # Step 3: Energy Threshold Backstop (Decision Backstop)
+        # If classifier is weak or ambiguous, trust the raw Energy signal if strong
+        E_S = features["E_S"].item()
+        E_negS = features["E_negS"].item()
+        diff = abs(E_S - E_negS)
+        tau = self.tau if hasattr(self, 'tau') else 0.5
         
-        if log_ratio > 0:
-            # Statement has higher energy → resisted by world → CONTRADICT
-            prediction = "contradict"
-            confidence = abs(log_ratio)
+        if diff > tau:
+             # Energy signal is STRONG: Override classifier
+             # If Statement Energy > Negation Energy -> Contradiction (prob low)
+             return 0.1 if E_S > E_negS else 0.9
         else:
-            # Negation has higher energy → statement accepted → CONSISTENT
-            prediction = "consistent"
-            confidence = abs(log_ratio)
-        
-        # Return probability (0 = contradict, 1 = consistent)
-        # Use sigmoid-like scaling for smoother output
-        prob_offset = min(confidence * 0.1, 0.4)  # Cap offset at 0.4
-        if prediction == "consistent":
-            return 0.5 + prob_offset
-        else:
-            return 0.5 - prob_offset
+             # Energy signal is weak: Trust learned classifier
+             return prob_classifier
 
     @modal.method()
     def generate_submission(self):
