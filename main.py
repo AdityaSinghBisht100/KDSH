@@ -1,3 +1,4 @@
+
 import sys
 import os
 import argparse
@@ -12,33 +13,37 @@ from narrative_system import NarrativeConsistencySystem
 def main():
     parser = argparse.ArgumentParser(description="KDSH Narrative Consistency System")
     parser.add_argument("--verify", action="store_true", help="Run verification pipeline")
+    parser.add_argument("--train", action="store_true", help="Run training loop")
+    parser.add_argument("--data_dir", type=str, default="./files", help="Directory containing train.csv and book .txt files")
+    parser.add_argument("--model_dir", type=str, default="./models", help="Directory to save/load models")
+    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
     
     args = parser.parse_args()
     
-    print("Initializing KDSH System...")
+    print(f"Initializing KDSH System (Data: {args.data_dir}, Models: {args.model_dir})...")
     
-    # Initialize system (local execution)
-    system = NarrativeConsistencySystem()
+    # Initialize system with custom paths
+    system = NarrativeConsistencySystem(data_dir=args.data_dir, model_dir=args.model_dir)
     
     if args.verify:
         print("Running verification...")
-        # We need to manually trigger what verify_pipeline does, since we are not in Modal context potentially
-        # Or we can just call the method if we instantiate it.
-        # Note: calling modal methods locally requires creating an instance.
+        # Since verify_pipeline is a modal method, we just call manual logic here or we can call it if it wasn't stripped.
+        # But we added it to the class in system.py, so we can call it.
+        try:
+             system.verify_pipeline()
+        except AttributeError:
+             # In case Modal wraps it weirdly
+             system.verify_pipeline.local(system)
+             
+    elif args.train:
+        print("Running training...")
+        system.train(epochs=args.epochs)
         
-        # We need to use 'with' or manual init
-        with system as s:
-            s.verify_pipeline.local(s) 
-            # Note: .local() is for Modal functions. If it's a class method decorated with @modal.method(),
-            # calling it directly on an instance might work if we aren't using the Modal runner stub.
-            # But the class definition in system.py uses @app.cls.
-            # Local instantiation of @app.cls decorated class usually works as a normal class 
-            # but methods might need care.
-            
-            pass 
-            
     else:
-        print("System ready. Use --verify to run test.")
+        print("System ready.")
+        print("Usage:")
+        print("  python main.py --verify")
+        print("  python main.py --train --data_dir /path/to/data --epochs 10")
         
 if __name__ == "__main__":
     main()

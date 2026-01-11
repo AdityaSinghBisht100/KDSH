@@ -1,6 +1,4 @@
 # Data files
-input.txt
-*.txt
 !requirements.txt
 !README*.md
 !QUICKSTART.md

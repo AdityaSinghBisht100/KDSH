@@ -1,3 +1,4 @@
+
 import modal
 import torch
 import torch.nn as nn
@@ -14,8 +15,6 @@ from .consistency import CounterfactualChecker, ContrastiveEnergyLoss, SURPRISE_
 from .models import CoherenceClassifier, NarrativeDataset
 
 # Fix for import resolution when running inside Modal vs Local
-# Assuming bdh.py and sentence_analyzer.py are in the parent directory (root of KDSH)
-# We might need to add parent dir to path if not present
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
@@ -25,7 +24,6 @@ try:
     from bdh import BDH, BDHConfig
     from sentence_analyzer import SentenceAnalyzer
 except ImportError:
-    # If standard import fails, try relative (though usually sys.path handles it)
     print("Warning: Could not import BDH/SentenceAnalyzer directly. Please ensure they are in the python path.")
     raise
 
@@ -59,7 +57,12 @@ EMBEDDING_DIM = 256
     volumes={"/models": vol}
 )
 class NarrativeConsistencySystem:
-    def __init__(self):
+    def __init__(self, data_dir="./files", model_dir="./models"):
+        self.data_dir = data_dir
+        self.model_dir = model_dir
+        if not os.path.exists(self.model_dir):
+            os.makedirs(self.model_dir, exist_ok=True)
+            
         self.backstory_store = {}
         self.device = None
         self.classifier = None
@@ -103,10 +106,7 @@ class NarrativeConsistencySystem:
         
         # Load Weights if available
         # Check both Modal path and local path
-        weights_path = "/models/narrative_consistency.pt"
-        if not os.path.exists(weights_path) and os.path.exists("./models/narrative_consistency.pt"):
-             weights_path = "./models/narrative_consistency.pt"
-             
+        weights_path = os.path.join(self.model_dir, "narrative_consistency.pt")
         if os.path.exists(weights_path):
             try:
                 self.classifier.load_state_dict(torch.load(weights_path, map_location=self.device), strict=False)
@@ -114,10 +114,7 @@ class NarrativeConsistencySystem:
             except Exception as e:
                 print(f"Weights load failed: {e}")
                 
-        bdh_path = "/models/bdh_base.pt"
-        if not os.path.exists(bdh_path) and os.path.exists("./models/bdh_base.pt"):
-             bdh_path = "./models/bdh_base.pt"
-
+        bdh_path = os.path.join(self.model_dir, "bdh_base.pt")
         if os.path.exists(bdh_path):
              self.bdh.load_state_dict(torch.load(bdh_path, map_location=self.device), strict=False)
 
@@ -130,13 +127,6 @@ class NarrativeConsistencySystem:
         print("--> Initialization complete")
 
     def encode_text(self, text_list, distinct_states=None):
-        """
-        Args:
-            text_list: List[str] - The content to encode
-            distinct_states: Optional List[Tensor] or Single Tensor - The initial states to use.
-                             If None, encodes in isolation (standard).
-                             If provided, encodes 'as continuation' of that state.
-        """
         if self.bdh is None:
             self._initialize_components()
             
@@ -192,7 +182,7 @@ class NarrativeConsistencySystem:
     def absorb_story_stream(self, text_stream):
         """
         Reads a full story stream and returns the Final State.
-        Infinite Context Learning.
+        Expected to process book content.
         """
         self.bdh.reset_state()
         
@@ -202,7 +192,6 @@ class NarrativeConsistencySystem:
         with torch.no_grad():
             for i in range(0, len(text_stream), chunk_size):
                 chunk = text_stream[i : i+chunk_size]
-                # Convert to tensor
                 tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=self.device)
                 if tokens.size(1) == 0: continue
                 
@@ -214,12 +203,6 @@ class NarrativeConsistencySystem:
     def precompute_backstory_states(self, train_df, test_mode=True):
         """
         ENTITY-AWARE WORLD STATE: Maintains per-entity BDH states.
-        
-        Instead of a single global state that entangles all character facts,
-        we route updates to relevant entity states for concentrated signals.
-        
-        Args:
-            test_mode: If True, use only first 50,000 chars for fast testing
         """
         print("Pre-computing Entity-Aware World States...")
         
@@ -238,24 +221,24 @@ class NarrativeConsistencySystem:
         
         # Book paths mapping
         book_paths = {
-            "The Count of Monte Cristo": "/root/files/The Count of Monte Cristo.txt",
-            "In Search of the Castaways": "/root/files/In search of the castaways.txt"
+            "The Count of Monte Cristo": os.path.join(self.data_dir, "The Count of Monte Cristo.txt"),
+            "In Search of the Castaways": os.path.join(self.data_dir, "In search of the castaways.txt")
         }
         
         # Process each book
         for book_name in unique_books:
             book_name = str(book_name).strip()
+            # Try specific map first, then generic in data_dir
             book_path = book_paths.get(book_name)
             
-            # Local fallback for paths
-            if not book_path:
-                 # try local ./files
-                 local_path = f"./files/{book_name}.txt"
-                 if os.path.exists(local_path):
-                      book_path = local_path
+            if not book_path or not os.path.exists(book_path):
+                 # Try direct filename match
+                 candidate = os.path.join(self.data_dir, f"{book_name}.txt")
+                 if os.path.exists(candidate):
+                     book_path = candidate
             
-            if not book_path:
-                print(f"  -> Warning: Unknown book '{book_name}'")
+            if not book_path or not os.path.exists(book_path):
+                print(f"  -> Warning: Unknown book or file not found '{book_name}' in {self.data_dir}")
                 continue
                 
             try:
@@ -268,17 +251,13 @@ class NarrativeConsistencySystem:
                 
                 print(f"    -> Processing {len(full_text):,} characters with entity routing...")
                 
-                # Get entities relevant to this book
                 book_entities = set(
                     train_df[train_df['book_name'].str.strip() == book_name]['char']
                     .dropna().str.strip().unique()
                 )
-                print(f"    -> Entities in book: {book_entities}")
                 
-                # Entity-aware ingestion
                 world_state = self._entity_aware_ingest(full_text, book_entities)
                 self.world_states[book_name] = world_state
-                
                 print(f"    -> Done! Global + {len(book_entities)} entity states created.")
                 
             except Exception as e:
@@ -288,7 +267,6 @@ class NarrativeConsistencySystem:
         
         print(f"Computed WorldStates for {len(self.world_states)} books.")
         
-        # Legacy compatibility: map (book, char) → merged state
         distinct_chars = train_df[['book_name', 'char']].drop_duplicates()
         
         for _, row in distinct_chars.iterrows():
@@ -299,7 +277,6 @@ class NarrativeConsistencySystem:
             key = (book, char)
             
             if book in self.world_states:
-                # Use merged state (30% global, 70% entity)
                 self.backstory_states[key] = self.world_states[book].get_query_state(char, alpha=0.3)
             else:
                 self.bdh.reset_state()
@@ -308,12 +285,8 @@ class NarrativeConsistencySystem:
         print(f"Mapped {len(self.backstory_states)} character-book pairs with merged states.")
     
     def _entity_aware_ingest(self, text: str, entities: set) -> WorldState:
-        """
-        Stream-process text with entity-aware state routing.
-        """
         chunk_size = 512
         
-        # Initialize states
         self.bdh.reset_state()
         initial_state = self.bdh.get_state().cpu()
         
@@ -326,7 +299,6 @@ class NarrativeConsistencySystem:
         entity_update_counts = {e: 0 for e in entities}
         gate_values = {e: [] for e in entities} 
         
-        # Initialize EntityWriteGate (learnable but used in inference mode here)
         state_dim = initial_state.numel()
         write_gate = EntityWriteGate(state_dim=64, proj_dim=32).to(self.device)
         write_gate.eval() 
@@ -340,40 +312,32 @@ class NarrativeConsistencySystem:
                 if tokens.size(1) == 0:
                     continue
                 
-                current_time += 1.0  # Increment timestep
+                current_time += 1.0
                 
-                # 1. ALWAYS update global state
                 self.bdh.reset_state()
                 self.bdh.set_state(global_state.detach().clone().to(self.device))
                 self.bdh(tokens, use_state=True)
                 global_state = self.bdh.get_state().cpu()
                 global_timestamp = current_time
                 
-                # 2. Detect entities in this chunk
                 chunk_lower = chunk.lower()
                 mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
+                chunk_emb = global_state
                 
-                # Get chunk embedding for gating (use BDH output summary)
-                chunk_emb = global_state  # Proxy for chunk representation
-                
-                # 3. GATED update to relevant entity states
                 for entity in mentioned_entities:
                     old_state = entity_states[entity].detach().clone()
                     
-                    # Compute new state
                     self.bdh.reset_state()
                     self.bdh.set_state(old_state.to(self.device))
                     self.bdh(tokens, use_state=True)
                     new_state = self.bdh.get_state().cpu()
                     
-                    # Compute gate (scalar in [0, 1])
                     gate = write_gate(
                         old_state.to(self.device), 
                         chunk_emb.to(self.device), 
                         global_state.to(self.device)
                     ).item()
                     
-                    # Gated update: entity_state = old + gate * (new - old)
                     update = new_state - old_state
                     entity_states[entity] = old_state + gate * update
                     entity_timestamps[entity] = current_time
@@ -381,14 +345,6 @@ class NarrativeConsistencySystem:
                     entity_update_counts[entity] += 1
                     gate_values[entity].append(gate)
         
-        # Enhanced Gate Observability
-        all_gates = []
-        for entity, count in entity_update_counts.items():
-            if count > 0:
-                gates = gate_values[entity]
-                all_gates.extend(gates)
-        
-        # Attach timestamps to WorldState for temporal decay
         world_state = WorldState(
             global_state=global_state.detach(),
             entity_states={k: v.detach() for k, v in entity_states.items()},
@@ -404,7 +360,6 @@ class NarrativeConsistencySystem:
         print("=== Running Internal Verification ===")
         self._initialize_components()
         
-        # Test Data
         data = {
             'book_name': ['TestBook', 'TestBook'],
             'char': ['Alice', 'Alice'],
@@ -412,6 +367,178 @@ class NarrativeConsistencySystem:
             'label': ['Consistent', 'Consistent']
         }
         df = pd.DataFrame(data)
-        # Mock precompute
         self.precompute_backstory_states(df, test_mode=True)
         print("Verification complete.")
+
+    def filter_explicit_dataset(self, df):
+        """Step 1: Restrict task to EXPLICIT contradictions."""
+        print("Step 1: Filtering for EXPLICIT contradictions...")
+        valid_indices = []
+        
+        book_paths = {
+            "The Count of Monte Cristo": os.path.join(self.data_dir, "The Count of Monte Cristo.txt"),
+            "In Search of the Castaways": os.path.join(self.data_dir, "In search of the castaways.txt")
+        }
+        
+        for book in df['book_name'].unique():
+            book = book.strip()
+            path = book_paths.get(book)
+            
+            if not path or not os.path.exists(path):
+                 path = os.path.join(self.data_dir, f"{book}.txt")
+                 
+            if not path or not os.path.exists(path):
+                continue
+            
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    content = f.read(50000).lower() 
+            except Exception as e:
+                print(f"Error reading {book}: {e}")
+                continue
+                
+            book_df = df[df['book_name'] == book]
+            for idx, row in book_df.iterrows():
+                statement = str(row['content'])
+                keywords = [w for w in statement.split() if len(w) > 3][:3]
+                if not keywords: keywords = statement.split()[:3]
+                
+                if any(k.lower() in content for k in keywords):
+                    valid_indices.append(idx)
+        
+        filtered = df.loc[valid_indices].copy()
+        print(f"Explicit Filter: kept {len(filtered)}/{len(df)} samples")
+        return filtered
+
+    def evaluate_accuracy(self, test_df):
+        correct = 0
+        total = 0
+        self.bdh.eval()
+        self.classifier.eval()
+        
+        if hasattr(self, 'hybrid_classifier') and self.hybrid_classifier is not None:
+             self.hybrid_classifier.eval()
+        
+        with torch.no_grad():
+            for _, row in test_df.iterrows():
+                book = row['book_name']
+                char = row['char']
+                content = row['content']
+                label = row['label'].strip().lower()
+                
+                score = self.predict_single(book, char, content)
+                
+                pred = "consistent" if score > 0.5 else "contradict"
+                if pred == label:
+                    correct += 1
+                total += 1
+                
+        return correct / total if total > 0 else 0
+
+    def run_training_step(self, train_df, batch_size=4):
+        self.classifier.train()
+        self.bdh.train()
+        total_loss = 0
+        
+        optimizer = torch.optim.Adam(
+            list(self.classifier.parameters()) + list(self.bdh.parameters()),
+            lr=1e-4
+        )
+        criterion = nn.CrossEntropyLoss()
+        
+        for start_idx in range(0, len(train_df), batch_size):
+            batch = train_df.iloc[start_idx : start_idx + batch_size]
+            if len(batch) < 2: continue
+            
+            contents = batch['content'].tolist()
+            labels = torch.tensor(
+                [1 if l.strip().lower() == 'consistent' else 0 for l in batch['label']],
+                device=self.device
+            )
+            
+            states = []
+            for _, row in batch.iterrows():
+                key = (row['book_name'].strip(), row['char'].strip())
+                if key in self.backstory_states:
+                    states.append(self.backstory_states[key].to(self.device))
+                else:
+                    self.bdh.reset_state()
+                    states.append(self.bdh.get_state())
+
+            v_iso = self.encode_text(contents, distinct_states=None)
+            v_ctx = self.encode_text(contents, distinct_states=states)
+            
+            optimizer.zero_grad()
+            logits = self.classifier(v_iso, v_ctx)
+            
+            ce_loss = criterion(logits, labels)
+            loss = ce_loss 
+            
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            
+        return total_loss / max(1, len(train_df) // batch_size)
+
+    def predict_single(self, book_name, char_name, content):
+        book_name = book_name.strip()
+        char_name = char_name.strip()
+        key = (book_name, char_name)
+        
+        if self.bdh is None: self._initialize_components()
+        
+        if key not in self.backstory_states:
+             if book_name in self.world_states:
+                 ws = self.world_states[book_name]
+                 state = ws.get_query_state(char_name)
+                 self.backstory_states[key] = state.to(self.device)
+             else:
+                 book_path = os.path.join(self.data_dir, f"{book_name}.txt")
+                 if not os.path.exists(book_path):
+                      return 0.5 
+                 
+                 with open(book_path, 'r', encoding='utf-8') as f:
+                      text = f.read()
+                 self.bdh.reset_state()
+                 self.absorb_story_stream(text[:10000])
+                 state = self.bdh.get_state()
+                 self.backstory_states[key] = state
+
+        state = self.backstory_states[key].to(self.device)
+        
+        v_iso = self.encode_text([content], distinct_states=None)
+        v_ctx = self.encode_text([content], distinct_states=state)
+        
+        with torch.no_grad():
+             logits = self.classifier(v_iso, v_ctx)
+             probs = torch.softmax(logits, dim=1)
+             return probs[0, 1].item()
+
+    def train(self, epochs=5):
+        print(f"Starting Training on {self.device}...")
+        self._initialize_components()
+        
+        train_path = os.path.join(self.data_dir, "train.csv")
+        test_path = os.path.join(self.data_dir, "test.csv")
+        
+        if not os.path.exists(train_path):
+             print(f"Train file not found at {train_path}")
+             return
+             
+        train_df = pd.read_csv(train_path)
+        if os.path.exists(test_path):
+             test_df = pd.read_csv(test_path)
+        else:
+             test_df = train_df.copy() # Mock
+             
+        combined = pd.concat([train_df, test_df])
+        self.precompute_backstory_states(combined, test_mode=False)
+        
+        print("Training...")
+        for epoch in range(epochs):
+             loss = self.run_training_step(train_df)
+             acc = self.evaluate_accuracy(test_df)
+             print(f"Epoch {epoch+1}: Loss={loss:.4f} Acc={acc:.2%}")
+             
+             torch.save(self.classifier.state_dict(), os.path.join(self.model_dir, "narrative_consistency.pt"))
+             torch.save(self.bdh.state_dict(), os.path.join(self.model_dir, "bdh_base.pt"))
