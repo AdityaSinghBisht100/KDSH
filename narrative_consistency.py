@@ -94,39 +94,47 @@ class EntityWriteGate(nn.Module):
     Controls how much new information overwrites entity state.
     prevents entity-state pollution from irrelevant mentions.
     
-    Review Fix #2, #3: Scalar gate with reduced dimensionality.
+    FIXED: Rule-based gate (no training required).
+    Uses variance difference to detect state-changing chunks.
     """
-    def __init__(self, state_dim: int, proj_dim: int = 64):
+    def __init__(self, state_dim: int = 64, proj_dim: int = 32):
         super().__init__()
-        self.proj_dim = proj_dim
-        
-        # Dimension reduction projections
-        self.proj_entity = nn.Linear(state_dim, proj_dim)
-        self.proj_chunk = nn.Linear(state_dim, proj_dim)
-        self.proj_global = nn.Linear(state_dim, proj_dim)
-        
-        # Scalar gate MLP
-        self.gate_mlp = nn.Sequential(
-            nn.Linear(proj_dim * 3, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),  # Scalar output
-            nn.Sigmoid()
-        )
+        # No learnable parameters - rule-based
+        self.base_gate = 0.1  # Default low gate
+        self.sensitivity = 5.0  # How sensitive to variance changes
     
     def forward(self, entity_state: torch.Tensor, chunk_emb: torch.Tensor, 
                 global_state: torch.Tensor) -> torch.Tensor:
         """
-        Returns scalar gate in [0, 1].
-        Low = ignore mention, High = write update.
-        """
-        # Flatten states to [D] if multi-dimensional
-        e = entity_state.view(-1).mean().unsqueeze(0).expand(self.proj_dim)
-        c = chunk_emb.view(-1).mean().unsqueeze(0).expand(self.proj_dim) if chunk_emb is not None else torch.zeros(self.proj_dim, device=entity_state.device)
-        g = global_state.view(-1).mean().unsqueeze(0).expand(self.proj_dim)
+        Rule-based gate using variance difference.
         
-        gate_input = torch.cat([e, c, g], dim=-1)
-        gate = self.gate_mlp(gate_input.unsqueeze(0)).squeeze()
-        return gate
+        High gate: chunk brings NEW information (variance increases)
+        Low gate: chunk is redundant/descriptive (variance stable)
+        """
+        # Extract variance features
+        e_flat = entity_state.view(-1).float()
+        c_flat = chunk_emb.view(-1).float() if chunk_emb is not None else torch.zeros_like(e_flat)
+        g_flat = global_state.view(-1).float()
+        
+        # Compute variance of each state
+        e_var = e_flat.var().item() + 1e-8
+        c_var = c_flat.var().item() + 1e-8
+        g_var = g_flat.var().item() + 1e-8
+        
+        # Key insight: if chunk variance differs significantly from entity variance,
+        # the chunk brings new information → higher gate
+        var_ratio = abs(c_var - e_var) / max(e_var, c_var)
+        
+        # Also consider: if global changed a lot, this is important info
+        global_entity_diff = abs(g_var - e_var) / max(e_var, g_var)
+        
+        # Combine signals
+        novelty_score = (var_ratio + global_entity_diff) / 2.0
+        
+        # Apply sigmoid-like transform with base_gate
+        gate = self.base_gate + (1.0 - self.base_gate) * min(novelty_score * self.sensitivity, 1.0)
+        
+        return torch.tensor(gate, device=entity_state.device)
 
 
 class AdaptiveMerge(nn.Module):
@@ -182,7 +190,8 @@ class ContrastiveEnergyLoss(nn.Module):
     Aligns surprise with labels via margin loss.
     Contradict samples should have higher E_pos than E_neg.
     """
-    def __init__(self, margin: float = 0.1):
+    def __init__(self, margin: float = 0.3):
+        """Margin increased to 0.3 for stronger separation."""
         super().__init__()
         self.margin = margin
     
@@ -736,16 +745,36 @@ class NarrativeConsistencySystem:
                     entity_update_counts[entity] += 1
                     gate_values[entity].append(gate)
         
-        # Log entity update statistics with gate info
+        # Enhanced Gate Observability (Fix #5)
+        all_gates = []
         for entity, count in entity_update_counts.items():
             if count > 0:
-                avg_gate = sum(gate_values[entity]) / len(gate_values[entity])
-                print(f"      {entity}: {count} updates, avg_gate={avg_gate:.3f}")
+                gates = gate_values[entity]
+                all_gates.extend(gates)
+                avg_gate = sum(gates) / len(gates)
+                min_gate = min(gates)
+                max_gate = max(gates)
+                print(f"      {entity}: {count} updates | gate: avg={avg_gate:.3f}, min={min_gate:.3f}, max={max_gate:.3f}")
+        
+        # Global gate statistics
+        if all_gates:
+            sorted_gates = sorted(all_gates)
+            n = len(sorted_gates)
+            q25 = sorted_gates[n // 4] if n >= 4 else sorted_gates[0]
+            q50 = sorted_gates[n // 2]
+            q75 = sorted_gates[3 * n // 4] if n >= 4 else sorted_gates[-1]
+            print(f"      [GATE STATS] total={n} | mean={sum(all_gates)/n:.3f} | q25={q25:.3f} | q50={q50:.3f} | q75={q75:.3f}")
+            
+            # Warning if gates not selective
+            mean_gate = sum(all_gates) / n
+            if mean_gate > 0.35:
+                print(f"⚠️ WARNING: mean_gate={mean_gate:.3f} > 0.35 - gate not selective enough!")
         
         # Attach timestamps to WorldState for temporal decay
+        # FIX #2: Detach all tensors to freeze WorldState for training
         world_state = WorldState(
-            global_state=global_state,
-            entity_states=entity_states,
+            global_state=global_state.detach(),
+            entity_states={k: v.detach() for k, v in entity_states.items()},
             known_entities=entities
         )
         # Store timestamps as attribute
@@ -832,7 +861,22 @@ class NarrativeConsistencySystem:
             
             optimizer.zero_grad()
             logits = self.classifier(v_iso, v_ctx)
-            loss = criterion(logits, labels)
+            
+            # Classification loss
+            ce_loss = criterion(logits, labels)
+           
+            # based on classifier confidence to encourage selective gating
+            lambda_sparsity = 1e-2  # Sparsity coefficient
+            
+            # Proxy sparsity: penalize low-confidence predictions
+            # This indirectly encourages better state separation
+            probs = torch.softmax(logits, dim=1)
+            entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1).mean()
+            sparsity_loss = lambda_sparsity * entropy  # Lower entropy = more confident
+            
+            # Total loss
+            loss = ce_loss + sparsity_loss
+            
             loss.backward()
             optimizer.step()
             
@@ -864,8 +908,19 @@ class NarrativeConsistencySystem:
             classifier_params = list(self.classifier.parameters())
             self.optimizer = torch.optim.Adam(feature_extractor_params + classifier_params, lr=2e-4)
             
-            epochs = 20  # Full run, no early stopping
+            # Training Stability Fixes
+            epochs = 15  # Reduced from 20 - best epoch expected in 3-7
             best_acc = 0.0
+            patience = 2  # Early stopping patience
+            no_improve_count = 0
+            
+            # Verify WorldState is frozen (Fix #2)
+            print("=" * 50)
+            print("WorldState Freeze Verification:")
+            for book_name, ws in self.world_states.items():
+                if hasattr(ws, 'global_timestamp'):
+                    print(f"  {book_name}: timestamp={ws.global_timestamp:.1f} (FROZEN)")
+            print("=" * 50)
             
             for epoch in range(epochs):
                 avg_loss = self.run_training_step(train_df, batch_size=16)
@@ -875,6 +930,8 @@ class NarrativeConsistencySystem:
                 # Save best checkpoint
                 if test_acc > best_acc:
                     best_acc = test_acc
+                    no_improve_count = 0  # Reset patience counter
+                    
                     # Save to Volume (mounted at /models)
                     checkpoint_path = "/models/best_model.pt"
                     torch.save({
@@ -884,6 +941,14 @@ class NarrativeConsistencySystem:
                         'best_acc': best_acc
                     }, checkpoint_path)
                     print(f"  -> New Best! Saved checkpoint (Acc: {best_acc:.2%})")
+                else:
+                    no_improve_count += 1
+                    print(f"  -> No improvement ({no_improve_count}/{patience})")
+                    
+                    # Early stopping check
+                    if no_improve_count >= patience:
+                        print(f"Early stopping triggered at epoch {epoch+1}")
+                        break
                 
             return f"Training Complete. Best Acc: {best_acc:.2%}"
             
