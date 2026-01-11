@@ -27,13 +27,8 @@ def main():
     
     if args.verify:
         print("Running verification...")
-        # Since verify_pipeline is a modal method, we just call manual logic here or we can call it if it wasn't stripped.
-        # But we added it to the class in system.py, so we can call it.
-        try:
-             system.verify_pipeline()
-        except AttributeError:
-             # In case Modal wraps it weirdly
-             system.verify_pipeline.local(system)
+        # Now this is a standard method call
+        system.verify_pipeline()
              
     elif args.train:
         print("Running training...")

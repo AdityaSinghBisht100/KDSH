@@ -1,11 +1,11 @@
 
-import modal
 import torch
 import torch.nn as nn
 import pandas as pd
 import numpy as np
 import sys
 import os
+from pathway.xpacks.llm.embedders import OpenAIEmbedder
 from pathlib import Path
 from typing import List, Dict, Tuple
 
@@ -14,7 +14,7 @@ from .world_state import WorldState, EntityWriteGate, AdaptiveMerge
 from .consistency import CounterfactualChecker, ContrastiveEnergyLoss, SURPRISE_MAX
 from .models import CoherenceClassifier, NarrativeDataset
 
-# Fix for import resolution when running inside Modal vs Local
+# Fix for import resolution
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
@@ -27,35 +27,10 @@ except ImportError:
     print("Warning: Could not import BDH/SentenceAnalyzer directly. Please ensure they are in the python path.")
     raise
 
-# Define Modal App
-app = modal.App("narrative-consistency-classifier")
-
-# Define Image
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
-        "torch",
-        "transformers",
-        "pandas",
-        "numpy",
-        "scikit-learn"
-    )
-    .add_local_dir(".", remote_path="/root")
-)
-
-# Define Volume
-vol = modal.Volume.from_name("narrative-models", create_if_missing=True)
-
 # Constants
 MAX_SEQ_LEN = 128
 EMBEDDING_DIM = 256
 
-@app.cls(
-    image=image,
-    gpu="A100",
-    timeout=12000,
-    volumes={"/models": vol}
-)
 class NarrativeConsistencySystem:
     def __init__(self, data_dir="./files", model_dir="./models"):
         self.data_dir = data_dir
@@ -80,17 +55,15 @@ class NarrativeConsistencySystem:
             import traceback
             traceback.print_exc()
             raise
+            
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
     def _initialize_components(self):
         if self.classifier is not None:
             return
 
         print(f"Initializing components in pid {os.getpid()}")
-        # Modal remote path adjustment
-        if os.path.exists("/root"):
-            sys.path.append("/root")
-            
-        print(f"ls /root: {os.listdir('/root')}" if os.path.exists("/root") else "Local execution")
         
         # Re-import BDH config to be sure
         from bdh import BDH, BDHConfig
@@ -105,7 +78,6 @@ class NarrativeConsistencySystem:
         self.classifier = CoherenceClassifier(EMBEDDING_DIM, self.device).to(self.device)
         
         # Load Weights if available
-        # Check both Modal path and local path
         weights_path = os.path.join(self.model_dir, "narrative_consistency.pt")
         if os.path.exists(weights_path):
             try:
@@ -355,7 +327,6 @@ class NarrativeConsistencySystem:
         
         return world_state
 
-    @modal.method()
     def verify_pipeline(self):
         print("=== Running Internal Verification ===")
         self._initialize_components()
@@ -472,6 +443,7 @@ class NarrativeConsistencySystem:
             logits = self.classifier(v_iso, v_ctx)
             
             ce_loss = criterion(logits, labels)
+            # Simple loss for now, removed complexity for basic cluster run reliability
             loss = ce_loss 
             
             loss.backward()
