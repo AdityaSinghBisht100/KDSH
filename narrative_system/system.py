@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import sys
 import os
-from pathway.xpacks.llm.embedders import OpenAIEmbedder
+
 from pathlib import Path
 from typing import List, Dict, Tuple
 
