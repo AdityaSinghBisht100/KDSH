@@ -187,6 +187,19 @@ class NarrativeConsistencySystem:
         """
         print("\n=== Phase 1: Feeding Knowledge (Ingesting Novels) ===")
         
+        cache_path = os.path.join(self.model_dir, "world_state_cache.pt")
+        if os.path.exists(cache_path) and not test_mode:
+            print(f"  ✨ Found cached World State at {cache_path}")
+            print(f"  ✨ Loading knowledge from disk (skipping raw text ingestion)...")
+            try:
+                cached_data = torch.load(cache_path)
+                self.world_states = cached_data['world_states']
+                self.backstory_states = cached_data['backstory_states']
+                print(f"  ✅ Loaded state for {len(self.world_states)} books. Jumping to Phase 2.")
+                return
+            except Exception as e:
+                print(f"  ⚠️ Error loading cache: {e}. Re-ingesting...")
+        
         self.bdh.eval()
         
         # Get unique books
@@ -263,9 +276,19 @@ class NarrativeConsistencySystem:
                 self.backstory_states[key] = self.bdh.get_state()
                 
         print(f"Mapped {len(self.backstory_states)} character-book pairs with merged states.")
+        
+        # SAVE CACHE
+        if not test_mode:
+            print("  💾 Saving World State cache to disk...")
+            torch.save({
+                'world_states': self.world_states,
+                'backstory_states': self.backstory_states
+            }, cache_path)
+            print("  ✅ Cache saved.")
     
     def _entity_aware_ingest(self, text: str, entities: set) -> WorldState:
-        chunk_size = 512
+        # Optimization: Larger chunk size for faster ingestion on GPU
+        chunk_size = 2048 # Was 512
         
         self.bdh.reset_state()
         initial_state = self.bdh.get_state().cpu()
