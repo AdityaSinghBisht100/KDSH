@@ -16,6 +16,10 @@ class BDHConfig:
     n_head: int = 4
     mlp_internal_dim_multiplier: int = 128
     vocab_size: int = 256
+    # Temporal conditioning parameters
+    temporal_dim: int = 64       # Temporal embedding dimension
+    use_temporal: bool = True    # Enable temporal-conditioned updates
+    max_chapters: int = 100      # Maximum chapter index for embedding
 
 
 def get_freqs(n, theta, dtype):
@@ -29,44 +33,7 @@ def get_freqs(n, theta, dtype):
     )
 
 
-class Attention(torch.nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        nh = config.n_head
-        D = config.n_embd
-        N = config.mlp_internal_dim_multiplier * D // nh
-        self.register_buffer(
-            'freqs',
-            get_freqs(N, theta=2**16, dtype=torch.float32).view(1, 1, 1, N)
-        )
-
-    @staticmethod
-    def phases_cos_sin(phases):
-        phases = (phases % 1) * (2 * math.pi)
-        phases_cos = torch.cos(phases)
-        phases_sin = torch.sin(phases)
-        return phases_cos, phases_sin
-
-    @staticmethod
-    def rope(phases, v):
-        v_rot = torch.stack((-v[..., 1::2], v[..., ::2]), dim=-1).view(*v.size())
-        phases_cos, phases_sin = Attention.phases_cos_sin(phases)
-        return (v * phases_cos).to(v.dtype) + (v_rot * phases_sin).to(v.dtype)
-
-    def forward(self, Q, K, V):
-        # Standard O(T^2) Attention for training stability
-        assert self.freqs.dtype == torch.float32
-        _, _, T, _ = Q.size()
-
-        r_phases = (
-            torch.arange(0, T, device=self.freqs.device, dtype=self.freqs.dtype).view(1, 1, -1, 1)
-        ) * self.freqs
-        QR = self.rope(r_phases, Q)
-        KR = self.rope(r_phases, K) # Use same rope for K
-
-        scores = (QR @ KR.mT).tril(diagonal=-1)
-        return scores @ V
+# Note: Old O(T²) Attention class removed - using only TemporalLinearAttention now
 
 class LinearAttention(nn.Module):
     """
@@ -181,6 +148,144 @@ class LinearAttention(nn.Module):
         return torch.matmul(Q, s)
 
 
+class TemporalLinearAttention(LinearAttention):
+    """
+    Temporal-Conditioned BDH Attention.
+    
+    Extends LinearAttention with:
+    1. Temporal encoding (chapter, scene, timestep)
+    2. Erase gate: selectively forget outdated facts
+    3. Write gate: control strength of new fact injection
+    
+    Update rule:
+        S_t = (1 - E_t) ⊙ (α_t * S_{t-1}) + W_t ⊙ (K_t^T V_t)
+    """
+    
+    def __init__(self, config):
+        super().__init__(config)
+        
+        D = config.n_embd
+        nh = config.n_head
+        head_dim = config.mlp_internal_dim_multiplier * D // nh
+        τ_dim = config.temporal_dim
+        
+        # Temporal embeddings
+        self.chapter_embed = nn.Embedding(config.max_chapters, τ_dim)
+        self.position_scale = nn.Parameter(torch.ones(1) * 0.001)  # Decay factor
+        
+        # Temporal projections for K, V conditioning
+        self.τ_proj_k = nn.Linear(τ_dim, head_dim)
+        self.τ_proj_v = nn.Linear(τ_dim, D)
+        
+        # Gating projections
+        # Erase gate: decides what to forget based on query + temporal context
+        self.erase_gate = nn.Sequential(
+            nn.Linear(head_dim + τ_dim, head_dim),
+            nn.Sigmoid()
+        )
+        # Write gate: decides how strongly to write new facts
+        self.write_gate = nn.Sequential(
+            nn.Linear(head_dim + τ_dim, head_dim),
+            nn.Sigmoid()
+        )
+        
+        # Temporal decay parameter (learnable per-head)
+        self.temporal_beta = nn.Parameter(torch.ones(nh, 1, 1) * 0.1)
+        
+        # Track current timestep for decay computation
+        self.register_buffer("current_timestep", torch.tensor(0))
+        self.register_buffer("stored_timesteps", torch.zeros(config.n_layer, nh, head_dim, 1))
+    
+    def encode_temporal(self, chapter_idx: int, timestep: int) -> torch.Tensor:
+        """
+        Encode temporal position into embedding.
+        τ = chapter_embed + positional_encoding(timestep)
+        """
+        device = self.chapter_embed.weight.device
+        
+        # Chapter embedding
+        chapter_t = torch.tensor([chapter_idx], device=device).clamp(0, self.chapter_embed.num_embeddings - 1)
+        τ_chapter = self.chapter_embed(chapter_t)  # [1, τ_dim]
+        
+        # Positional encoding for fine-grained timestep
+        τ_pos = self.position_scale * timestep
+        
+        return τ_chapter  # [1, τ_dim]
+    
+    def temporal_decay(self, t_stored: torch.Tensor, t_current: int) -> torch.Tensor:
+        """
+        Compute temporal decay factor.
+        Older facts decay exponentially.
+        """
+        distance = (t_current - t_stored).abs().float()
+        decay = torch.exp(-self.temporal_beta * distance * 0.0001)
+        return decay.clamp(0.01, 1.0)  # Never fully forget
+    
+    def forward_temporal(self, Q, K, V, chapter_idx: int = 0, timestep: int = 0, 
+                         use_state: bool = False, layer_idx: int = 0):
+        """
+        Temporal-conditioned forward pass with gated updates.
+        """
+        B, nh, T, d = Q.size()
+        
+        # Get temporal encoding
+        τ = self.encode_temporal(chapter_idx, timestep)  # [1, τ_dim]
+        
+        if use_state:
+            # Recurrent mode with temporal gating
+            out = []
+            curr_state = self.state[layer_idx]  # [nh, head_dim, D]
+            curr_time = self.stored_timesteps[layer_idx]  # [nh, head_dim, 1]
+            
+            for t in range(T):
+                actual_timestep = timestep + t
+                self.current_timestep = torch.tensor(actual_timestep)
+                
+                q_t = Q[:, :, t, :].unsqueeze(2)  # [B, nh, 1, d]
+                k_t = K[:, :, t, :].unsqueeze(2)
+                v_t = V[:, :, t, :].unsqueeze(2)
+                
+                # Temporally condition K, V
+                τ_k = self.τ_proj_k(τ).view(1, 1, 1, -1)  # [1, 1, 1, head_dim]
+                τ_v = self.τ_proj_v(τ).view(1, 1, 1, -1)  # [1, 1, 1, D]
+                k_t = k_t + τ_k
+                v_t = v_t + τ_v
+                
+                # Compute gates
+                gate_input = torch.cat([
+                    k_t.squeeze(2).mean(dim=0),  # [nh, head_dim]
+                    τ.expand(nh, -1)  # [nh, τ_dim]
+                ], dim=-1)  # [nh, head_dim + τ_dim]
+                
+                erase = self.erase_gate(gate_input).unsqueeze(-1)  # [nh, head_dim, 1]
+                write = self.write_gate(gate_input).unsqueeze(-1)  # [nh, head_dim, 1]
+                
+                # Temporal decay on old state
+                decay = self.temporal_decay(curr_time, actual_timestep)
+                α_t = self.alpha * decay  # [nh, head_dim, 1] ish
+                
+                # New KV contribution
+                kv = torch.matmul(k_t.transpose(-1, -2), v_t).squeeze(0)  # [nh, head_dim, D]
+                
+                # GATED UPDATE: S = (1-E) * (α * S) + W * KV
+                if B == 1:
+                    curr_state = (1 - erase) * (α_t * curr_state) + write * kv
+                    self.state[layer_idx] = curr_state
+                    self.stored_timesteps[layer_idx] = torch.full_like(curr_time, actual_timestep)
+                    state_for_attn = curr_state.unsqueeze(0)
+                else:
+                    state_for_attn = kv.unsqueeze(0)
+                
+                # Attend
+                o_t = torch.matmul(q_t, state_for_attn)
+                out.append(o_t.squeeze(2))
+                
+            return torch.stack(out, dim=2)
+        else:
+            # Parallel mode - standard attention
+            return self.standard_attn(Q, K, V)
+
+
 class BDH(nn.Module):
     def __init__(self, config: BDHConfig):
         super().__init__()
@@ -192,8 +297,10 @@ class BDH(nn.Module):
         self.decoder = nn.Parameter(torch.zeros((nh * N, D)).normal_(std=0.02))
         self.encoder = nn.Parameter(torch.zeros((nh, D, N)).normal_(std=0.02))
 
-        # The core USP: Switchable Linear Kernel
-        self.attn = LinearAttention(config)
+        # The core USP: Temporal-Conditioned State-Space Attention
+        # Always use temporal gating for fact-aware updates
+        self.attn = TemporalLinearAttention(config)
+        self.use_temporal = True
 
         self.ln = nn.LayerNorm(D, elementwise_affine=False, bias=False)
         self.embed = nn.Embedding(config.vocab_size, D)

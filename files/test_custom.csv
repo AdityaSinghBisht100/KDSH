@@ -1,21 +1,81 @@
 id,book_name,char,content,label
 1,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes is a young sailor on the ship Pharaon.,consistent
 2,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes arrives in Marseilles after a voyage.,consistent
-3,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes is about nineteen years old.,consistent
-4,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes is the captain of the Pharaon.,contradict
-5,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes has never been to sea before.,contradict
-6,The Count of Monte Cristo,M. Morrel,M. Morrel is the owner of the ship Pharaon.,consistent
-7,The Count of Monte Cristo,M. Morrel,M. Morrel was worried about the Pharaon.,consistent
-8,The Count of Monte Cristo,M. Morrel,M. Morrel is a sailor on the ship.,contradict
-9,The Count of Monte Cristo,Captain Leclere,Captain Leclere died during the voyage.,consistent
-10,The Count of Monte Cristo,Captain Leclere,Captain Leclere is still alive and commanding the ship.,contradict
-11,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan found a document in a bottle.,consistent
-12,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan is a Scottish nobleman.,consistent
-13,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan has never been on a ship.,contradict
-14,In Search of the Castaways,Captain Grant,Captain Grant is mentioned in the document found in the bottle.,consistent
-15,In Search of the Castaways,Captain Grant,Captain Grant was rescued before the story begins.,contradict
-16,In Search of the Castaways,Mary Grant,Mary Grant is the daughter of Captain Grant.,consistent
-17,In Search of the Castaways,Mary Grant,Mary Grant has no connection to Captain Grant.,contradict
-18,In Search of the Castaways,Lady Helena,Lady Helena is Lord Glenarvan's wife.,consistent
-19,In Search of the Castaways,Lady Helena,Lady Helena refused to help find Captain Grant.,contradict
-20,The Count of Monte Cristo,Danglars,Danglars is a fellow crew member with Dantes.,consistent
+3,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes is about nineteen or twenty years old.,consistent
+4,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes has black eyes and dark hair.,consistent
+5,The Count of Monte Cristo,Edmond Dantes,Dantes is standing by the pilot steering the ship.,consistent
+6,The Count of Monte Cristo,Edmond Dantes,Dantes watched every motion of the ship carefully.,consistent
+7,The Count of Monte Cristo,Edmond Dantes,Dantes left his station by the pilot when Morrel approached.,consistent
+8,The Count of Monte Cristo,Edmond Dantes,Dantes leaned over the ship's bulwarks with hat in hand.,consistent
+9,The Count of Monte Cristo,Edmond Dantes,Dantes told Morrel about Captain Leclere's death.,consistent
+10,The Count of Monte Cristo,Edmond Dantes,Dantes gave orders to the crew to take in sail.,consistent
+11,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes is the captain of the Pharaon.,contradict
+12,The Count of Monte Cristo,Edmond Dantes,Edmond Dantes has never been to sea before.,contradict
+13,The Count of Monte Cristo,Edmond Dantes,Dantes is an old man with gray hair.,contradict
+14,The Count of Monte Cristo,Edmond Dantes,Dantes refused to talk to M. Morrel.,contradict
+15,The Count of Monte Cristo,Edmond Dantes,Dantes stayed below deck during the entire voyage.,contradict
+16,The Count of Monte Cristo,Edmond Dantes,Dantes has blue eyes and blonde hair.,contradict
+17,The Count of Monte Cristo,Edmond Dantes,Dantes is the owner of the ship Pharaon.,contradict
+18,The Count of Monte Cristo,Edmond Dantes,Dantes is forty years old.,contradict
+19,The Count of Monte Cristo,Edmond Dantes,Dantes died during the voyage.,contradict
+20,The Count of Monte Cristo,Edmond Dantes,Dantes has no experience with sailing.,contradict
+21,The Count of Monte Cristo,M. Morrel,M. Morrel is the owner of the ship Pharaon.,consistent
+22,The Count of Monte Cristo,M. Morrel,Morrel came in a small skiff to meet the Pharaon.,consistent
+23,The Count of Monte Cristo,M. Morrel,Morrel was anxious about the ship's arrival.,consistent
+24,The Count of Monte Cristo,M. Morrel,Morrel asked Dantes what happened to Captain Leclere.,consistent
+25,The Count of Monte Cristo,M. Morrel,Morrel inquired about the cargo.,consistent
+26,The Count of Monte Cristo,M. Morrel,Morrel jumped into a skiff before the ship reached harbor.,consistent
+27,The Count of Monte Cristo,M. Morrel,Morrel addressed the young sailor as Dantes.,consistent
+28,The Count of Monte Cristo,M. Morrel,M. Morrel is a sailor on the ship.,contradict
+29,The Count of Monte Cristo,M. Morrel,M. Morrel is the pilot of the Pharaon.,contradict
+30,The Count of Monte Cristo,M. Morrel,Morrel refused to come meet the ship.,contradict
+31,The Count of Monte Cristo,M. Morrel,Morrel was not concerned about the cargo at all.,contradict
+32,The Count of Monte Cristo,M. Morrel,Morrel has never met Dantes before.,contradict
+33,The Count of Monte Cristo,M. Morrel,Morrel is a young man in his twenties.,contradict
+34,The Count of Monte Cristo,Captain Leclere,Captain Leclere died during the voyage.,consistent
+35,The Count of Monte Cristo,Captain Leclere,Captain Leclere died of brain-fever.,consistent
+36,The Count of Monte Cristo,Captain Leclere,Captain Leclere died in dreadful agony.,consistent
+37,The Count of Monte Cristo,Captain Leclere,Captain Leclere died off Civita Vecchia.,consistent
+38,The Count of Monte Cristo,Captain Leclere,Leclere left Naples greatly disturbed in mind.,consistent
+39,The Count of Monte Cristo,Captain Leclere,Leclere was attacked by a fever and died three days afterwards.,consistent
+40,The Count of Monte Cristo,Captain Leclere,Captain Leclere is still alive and commanding the ship.,contradict
+41,The Count of Monte Cristo,Captain Leclere,Captain Leclere fell into the sea.,contradict
+42,The Count of Monte Cristo,Captain Leclere,Captain Leclere arrived safely in Marseilles.,contradict
+43,The Count of Monte Cristo,Captain Leclere,Leclere was in good health throughout the voyage.,contradict
+44,The Count of Monte Cristo,Captain Leclere,Leclere never visited Naples.,contradict
+45,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan is a Scottish peer in the House of Lords.,consistent
+46,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan owns the yacht Duncan.,consistent
+47,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan is on board the yacht with Lady Helena.,consistent
+48,In Search of the Castaways,Lord Glenarvan,Glenarvan is a member of the Royal Thames Yacht Club.,consistent
+49,In Search of the Castaways,Lord Glenarvan,Glenarvan was with his young wife on the yacht.,consistent
+50,In Search of the Castaways,Lord Glenarvan,Glenarvan asked the captain about the shark.,consistent
+51,In Search of the Castaways,Lord Glenarvan,Glenarvan summoned Lady Helena to witness the shark chase.,consistent
+52,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan is a commoner with no title.,contradict
+53,In Search of the Castaways,Lord Glenarvan,Lord Glenarvan has never been on a ship.,contradict
+54,In Search of the Castaways,Lord Glenarvan,Glenarvan refused to participate in catching the shark.,contradict
+55,In Search of the Castaways,Lord Glenarvan,Glenarvan is not married.,contradict
+56,In Search of the Castaways,Lord Glenarvan,Glenarvan is American.,contradict
+57,In Search of the Castaways,Lady Helena,Lady Helena is Lord Glenarvan's wife.,consistent
+58,In Search of the Castaways,Lady Helena,Lady Helena is young.,consistent
+59,In Search of the Castaways,Lady Helena,Lady Helena was on board the Duncan.,consistent
+60,In Search of the Castaways,Lady Helena,Lady Helena was tempted by the exciting shark chase.,consistent
+61,In Search of the Castaways,Lady Helena,Lady Helena retired to the cabin during the shark examination.,consistent
+62,In Search of the Castaways,Lady Helena,Lady Helena joined Glenarvan on deck for the hunt.,consistent
+63,In Search of the Castaways,Lady Helena,Lady Helena refused to help find Captain Grant.,contradict
+64,In Search of the Castaways,Lady Helena,Lady Helena is not related to Lord Glenarvan.,contradict
+65,In Search of the Castaways,Lady Helena,Lady Helena was not on the yacht Duncan.,contradict
+66,In Search of the Castaways,Lady Helena,Lady Helena is Lord Glenarvan's mother.,contradict
+67,In Search of the Castaways,Captain Mangles,Captain Mangles is the captain of the yacht Duncan.,consistent
+68,In Search of the Castaways,Captain Mangles,Captain Mangles identified the fish as a shark.,consistent
+69,In Search of the Castaways,Captain Mangles,Captain Mangles gave orders to catch the shark.,consistent
+70,In Search of the Castaways,Captain Mangles,Captain Mangles informed Lord Glenarvan about the shark.,consistent
+71,In Search of the Castaways,Captain Mangles,John Mangles is Captain Mangles' first name.,consistent
+72,In Search of the Castaways,Captain Mangles,Captain Mangles is the owner of the yacht.,contradict
+73,In Search of the Castaways,Captain Mangles,Captain Mangles is a passenger on the Duncan.,contradict
+74,In Search of the Castaways,Captain Mangles,Captain Mangles did not see the shark.,contradict
+75,In Search of the Castaways,Major MacNabb,Major MacNabb is Lord Glenarvan's cousin.,consistent
+76,In Search of the Castaways,Major MacNabb,Major MacNabb was on board the Duncan.,consistent
+77,In Search of the Castaways,Major MacNabb,MacNabb answered calmly when asked about the shark hunt.,consistent
+78,In Search of the Castaways,Major MacNabb,MacNabb said he was of whatever opinion pleases Glenarvan.,consistent
+79,In Search of the Castaways,Major MacNabb,Major MacNabb is not related to Lord Glenarvan.,contradict
+80,In Search of the Castaways,Major MacNabb,Major MacNabb was not on the yacht.,contradict

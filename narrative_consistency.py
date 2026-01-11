@@ -11,6 +11,7 @@ Run with: modal run narrative_consistency.py
 """
 
 import modal
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -45,6 +46,326 @@ vol = modal.Volume.from_name("narrative-models", create_if_missing=True)
 # Constants
 MAX_SEQ_LEN = 128
 EMBEDDING_DIM = 256
+
+# --- WorldState: Entity-Aware State Management ---
+
+from dataclasses import dataclass, field
+
+@dataclass
+class WorldState:
+    """
+    Entity-Aware World State.
+    
+    Instead of a single global state that entangles all character facts,
+    we maintain separate BDH states per entity for concentrated signals.
+    """
+    global_state: torch.Tensor = None           # Shared narrative context
+    entity_states: Dict[str, torch.Tensor] = field(default_factory=dict)  # entity_id → BDH state
+    known_entities: set = field(default_factory=set)  # All detected entity names
+    
+    def get_query_state(self, entity: str, alpha: float = 0.3) -> torch.Tensor:
+        """
+        Merge global and entity state for inference.
+        
+        Args:
+            entity: Character name to query
+            alpha: Weight for global state (0.3 = 30% global, 70% entity)
+        
+        Returns:
+            Combined state tensor
+        """
+        if entity not in self.entity_states:
+            return self.global_state  # Fallback to global
+        
+        entity_s = self.entity_states[entity]
+        if self.global_state is None:
+            return entity_s
+            
+        # Linear interpolation
+        return alpha * self.global_state + (1 - alpha) * entity_s
+
+
+# --- Energy-Based World Model Components ---
+
+class EntityWriteGate(nn.Module):
+    """
+    Entity Write Gating (Scalar, Dimension-Reduced).
+    
+    Controls how much new information overwrites entity state.
+    prevents entity-state pollution from irrelevant mentions.
+    
+    Review Fix #2, #3: Scalar gate with reduced dimensionality.
+    """
+    def __init__(self, state_dim: int, proj_dim: int = 64):
+        super().__init__()
+        self.proj_dim = proj_dim
+        
+        # Dimension reduction projections
+        self.proj_entity = nn.Linear(state_dim, proj_dim)
+        self.proj_chunk = nn.Linear(state_dim, proj_dim)
+        self.proj_global = nn.Linear(state_dim, proj_dim)
+        
+        # Scalar gate MLP
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(proj_dim * 3, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),  # Scalar output
+            nn.Sigmoid()
+        )
+    
+    def forward(self, entity_state: torch.Tensor, chunk_emb: torch.Tensor, 
+                global_state: torch.Tensor) -> torch.Tensor:
+        """
+        Returns scalar gate in [0, 1].
+        Low = ignore mention, High = write update.
+        """
+        # Flatten states to [D] if multi-dimensional
+        e = entity_state.view(-1).mean().unsqueeze(0).expand(self.proj_dim)
+        c = chunk_emb.view(-1).mean().unsqueeze(0).expand(self.proj_dim) if chunk_emb is not None else torch.zeros(self.proj_dim, device=entity_state.device)
+        g = global_state.view(-1).mean().unsqueeze(0).expand(self.proj_dim)
+        
+        gate_input = torch.cat([e, c, g], dim=-1)
+        gate = self.gate_mlp(gate_input.unsqueeze(0)).squeeze()
+        return gate
+
+
+class AdaptiveMerge(nn.Module):
+    """
+    Query-Adaptive Global/Entity State Merge.
+    
+    Learns when to use global vs entity state based on query.
+    
+    Review Fix #4: Uses distributional summaries (mean + std).
+    """
+    def __init__(self, state_dim: int, proj_dim: int = 64):
+        super().__init__()
+        # Uses mean + std = 2x features
+        self.alpha_mlp = nn.Sequential(
+            nn.Linear(proj_dim * 6, 64),  # 3 inputs * 2 (mean+std)
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        self.proj_dim = proj_dim
+        self.proj = nn.Linear(state_dim, proj_dim) if state_dim != proj_dim else nn.Identity()
+    
+    def get_summary(self, state: torch.Tensor) -> torch.Tensor:
+        """Distributional summary: concat(mean, std)."""
+        flat = state.view(-1)
+        mean = flat.mean().unsqueeze(0).expand(self.proj_dim // 2)
+        std = flat.std().unsqueeze(0).expand(self.proj_dim // 2)
+        return torch.cat([mean, std], dim=-1)
+    
+    def forward(self, statement_emb: torch.Tensor, global_state: torch.Tensor,
+                entity_state: torch.Tensor) -> torch.Tensor:
+        """
+        Returns merged state with learned alpha.
+        """
+        stmt_summary = self.get_summary(statement_emb) if statement_emb is not None else torch.zeros(self.proj_dim, device=global_state.device)
+        global_summary = self.get_summary(global_state)
+        entity_summary = self.get_summary(entity_state)
+        
+        alpha_input = torch.cat([stmt_summary, global_summary, entity_summary], dim=-1)
+        alpha = self.alpha_mlp(alpha_input.unsqueeze(0)).squeeze()
+        
+        return alpha * global_state + (1 - alpha) * entity_state
+
+
+class ContrastiveEnergyLoss(nn.Module):
+    """
+    Contrastive Energy Loss for supervision.
+    
+    Aligns surprise with labels via margin loss.
+    Contradict samples should have higher E_pos than E_neg.
+    """
+    def __init__(self, margin: float = 0.1):
+        super().__init__()
+        self.margin = margin
+    
+    def forward(self, surprise_pos: float, surprise_neg: float, 
+                is_contradict: bool) -> torch.Tensor:
+        """
+        Args:
+            surprise_pos: Surprise of original statement
+            surprise_neg: Surprise of negated statement
+            is_contradict: True if label is "contradict"
+        
+        Returns:
+            Loss tensor
+        """
+        E_pos = torch.tensor(surprise_pos, dtype=torch.float32)
+        E_neg = torch.tensor(surprise_neg, dtype=torch.float32)
+        
+        if is_contradict:
+            # Contradiction: E_pos should be HIGH (resisted by world)
+            # E_neg should be LOW (accepted by world)
+            loss = torch.clamp(self.margin + E_neg - E_pos, min=0)
+        else:
+            # Consistent: E_pos should be LOW (accepted)
+            # E_neg should be HIGH (resisted)
+            loss = torch.clamp(self.margin + E_pos - E_neg, min=0)
+        
+        return loss
+
+
+# Maximum surprise value for clamping (Review Fix #6)
+SURPRISE_MAX = 100.0
+class CounterfactualChecker:
+    """
+    Counterfactual Consistency Checking.
+    
+    Detects LOGICAL contradictions by comparing:
+    - How much the statement "surprises" the world state
+    - How much its negation "surprises" the world state
+    
+    If statement causes MORE surprise → CONTRADICT
+    If negation causes MORE surprise → CONSISTENT
+    """
+    
+    def __init__(self, bdh_model, device):
+        self.bdh = bdh_model
+        self.device = device
+        
+        # Negation patterns (rule-based, no LLM)
+        self.negation_patterns = [
+            (r"^(.+) is (.+)$", r"\1 is NOT \2"),
+            (r"^(.+) was (.+)$", r"\1 was NOT \2"),
+            (r"^(.+) has (.+)$", r"\1 has NOT \2"),
+            (r"^(.+) had (.+)$", r"\1 had NOT \2"),
+            (r"^(.+) did (.+)$", r"\1 did NOT \2"),
+            (r"^(.+) does (.+)$", r"\1 does NOT \2"),
+            (r"^(.+) can (.+)$", r"\1 can NOT \2"),
+            (r"^(.+) will (.+)$", r"\1 will NOT \2"),
+        ]
+    
+    def negate(self, statement: str) -> str:
+        """
+        Generate negated variant of statement.
+        Rule-based, no external LLM required.
+        """
+        statement = statement.strip()
+        
+        # Try each pattern
+        for pattern, replacement in self.negation_patterns:
+            if re.match(pattern, statement, re.IGNORECASE):
+                return re.sub(pattern, replacement, statement, flags=re.IGNORECASE)
+        
+        # Fallback: prepend negation phrase
+        return f"It is NOT true that {statement}"
+    
+    def encode_text(self, text: str) -> torch.Tensor:
+        """Convert text to byte tokens."""
+        tokens = torch.tensor([[ord(c) % 256 for c in text]], dtype=torch.long, device=self.device)
+        return tokens
+    
+    def compute_surprise(self, text: str, world_state: torch.Tensor, 
+                          fact_time: float = 0.0, query_time: float = 1.0,
+                          temporal_beta: float = 0.01) -> float:
+        """
+        Measure how much the statement "surprises" the world state.
+        
+        High surprise = statement conflicts with stored facts.
+        
+        Bugfixes Applied:
+        - Fix #1: detach().clone() for safe state copying
+        - Fix #2: Layer-weighted Δ (later layers weighted more)
+        - Fix #5: Temporal decay affects decision
+        - Fix #6: log1p stabilization
+        """
+        # Safe state cloning - no gradient leakage
+        state_before = world_state.detach().clone().to(self.device)
+        
+        # Reset before setting to prevent silent drift
+        self.bdh.reset_state()
+        self.bdh.set_state(state_before)
+        
+        # Encode statement
+        tokens = self.encode_text(text)
+        
+        with torch.no_grad():
+            self.bdh(tokens, use_state=True)
+        
+        # Get state after
+        state_after = self.bdh.get_state()
+        
+        # Bugfix #2: Layer-weighted Δ (later layers encode higher-level state)
+        if state_after.dim() >= 2 and state_after.shape[0] > 1:
+            n_layers = state_after.shape[0]
+            layer_weights = torch.linspace(0.5, 1.5, n_layers, device=self.device)
+            
+            # Compute weighted sum of per-layer deltas
+            delta = 0.0
+            for i in range(n_layers):
+                layer_delta = torch.norm(state_after[i] - state_before[i], p=2).item()
+                delta += layer_weights[i].item() * layer_delta
+        else:
+            # Fallback for single-layer or flat state
+            delta = torch.norm(state_after - state_before, p=2).item()
+        
+        # Temporal decay affects surprise
+        temporal_decay = math.exp(-temporal_beta * (query_time - fact_time))
+        delta = delta * temporal_decay
+        
+        # Stabilize via log1p (prevents explosion)
+        surprise = math.log1p(delta)
+        
+        # Clamp for additional safety
+        surprise = min(surprise, math.log1p(SURPRISE_MAX))
+        
+        return surprise
+    
+    def predict(self, statement: str, world_state: torch.Tensor) -> Tuple[str, float]:
+        """
+        Counterfactual consistency prediction.
+        
+        Returns:
+            (prediction, confidence)
+            prediction: "consistent" or "contradict"
+            confidence: ratio indicating strength of prediction
+        """
+        # Generate negation
+        negated = self.negate(statement)
+        
+        # Compute surprise for both
+        surprise_S = self.compute_surprise(statement, world_state)
+        surprise_negS = self.compute_surprise(negated, world_state)
+        
+        # Avoid division by zero
+        epsilon = 1e-8
+        conflict_ratio = surprise_S / (surprise_negS + epsilon)
+        
+        # Decision logic
+        if conflict_ratio > 1.0:
+            # Statement caused MORE surprise than its negation
+            # → World state conflicts with statement
+            return "contradict", conflict_ratio
+        else:
+            # Negation caused MORE surprise
+            # → World state aligns with statement  
+            return "consistent", 1.0 / (conflict_ratio + epsilon)
+    
+    def predict_with_details(self, statement: str, world_state: torch.Tensor) -> Dict:
+        """
+        Detailed prediction with debug info.
+        """
+        negated = self.negate(statement)
+        surprise_S = self.compute_surprise(statement, world_state)
+        surprise_negS = self.compute_surprise(negated, world_state)
+        
+        epsilon = 1e-8
+        conflict_ratio = surprise_S / (surprise_negS + epsilon)
+        
+        prediction = "contradict" if conflict_ratio > 1.0 else "consistent"
+        
+        return {
+            "statement": statement,
+            "negated": negated,
+            "surprise_statement": surprise_S,
+            "surprise_negation": surprise_negS,
+            "conflict_ratio": conflict_ratio,
+            "prediction": prediction
+        }
+
 
 # --- Model Definitions ---
 
@@ -107,6 +428,9 @@ class NarrativeConsistencySystem:
         self.device = None
         self.classifier = None
         self.bdh = None
+        # Entity-Aware WorldState: book_name → WorldState
+        self.world_states: Dict[str, WorldState] = {}
+        self.backstory_states = {}  # Legacy compatibility
         
     def __enter__(self):
         print("--> Starting __enter__ initialization")
@@ -240,18 +564,25 @@ class NarrativeConsistencySystem:
 
     def precompute_backstory_states(self, train_df, test_mode=True):
         """
-        PERFECT WORLD STATE: Read books through BDH.
+        ENTITY-AWARE WORLD STATE: Maintains per-entity BDH states.
+        
+        Instead of a single global state that entangles all character facts,
+        we route updates to relevant entity states for concentrated signals.
         
         Args:
-            test_mode: If True, use only first 50,000 chars (~1 chapter) for fast testing
+            test_mode: If True, use only first 50,000 chars for fast testing
         """
-        print("Pre-computing Perfect World States (Full Book Absorption)...")
+        print("Pre-computing Entity-Aware World States...")
         
         self.bdh.eval()
         
         # Get unique books
         unique_books = train_df['book_name'].dropna().unique()
         print(f"  Found {len(unique_books)} unique books to process.")
+        
+        # Get all known entities (characters)
+        all_entities = set(train_df['char'].dropna().str.strip().unique())
+        print(f"  Known entities: {len(all_entities)} characters")
         
         if test_mode:
             print("  >> TEST MODE: Using first 50,000 characters only <<")
@@ -262,11 +593,7 @@ class NarrativeConsistencySystem:
             "In Search of the Castaways": "/root/files/In search of the castaways.txt"
         }
         
-        # ==========================================
-        # PHASE 1: Absorb books into BDH
-        # ==========================================
-        self.book_states = {}
-        
+        # Process each book
         for book_name in unique_books:
             book_name = str(book_name).strip()
             book_path = book_paths.get(book_name)
@@ -280,26 +607,32 @@ class NarrativeConsistencySystem:
                 with open(book_path, 'r', encoding='utf-8') as f:
                     full_text = f.read()
                 
-                # Limit text in test mode
                 if test_mode:
-                    full_text = full_text[:50000]  # ~1 chapter
+                    full_text = full_text[:50000]
                 
-                print(f"    -> Processing {len(full_text):,} characters...")
+                print(f"    -> Processing {len(full_text):,} characters with entity routing...")
                 
-                # Absorb through BDH
-                book_state = self.absorb_story_stream(full_text)
-                self.book_states[book_name] = book_state.cpu()
+                # Get entities relevant to this book
+                book_entities = set(
+                    train_df[train_df['book_name'].str.strip() == book_name]['char']
+                    .dropna().str.strip().unique()
+                )
+                print(f"    -> Entities in book: {book_entities}")
                 
-                print(f"    -> Done!")
+                # Entity-aware ingestion
+                world_state = self._entity_aware_ingest(full_text, book_entities)
+                self.world_states[book_name] = world_state
+                
+                print(f"    -> Done! Global + {len(book_entities)} entity states created.")
                 
             except Exception as e:
                 print(f"    -> Error: {e}")
+                import traceback
+                traceback.print_exc()
         
-        print(f"Computed world states for {len(self.book_states)} books.")
+        print(f"Computed WorldStates for {len(self.world_states)} books.")
         
-        # ==========================================
-        # PHASE 2: Map characters to their book states
-        # ==========================================
+        # Legacy compatibility: map (book, char) → merged state
         distinct_chars = train_df[['book_name', 'char']].drop_duplicates()
         
         for _, row in distinct_chars.iterrows():
@@ -309,13 +642,113 @@ class NarrativeConsistencySystem:
             char = str(row['char']).strip()
             key = (book, char)
             
-            if book in self.book_states:
-                self.backstory_states[key] = self.book_states[book]
+            if book in self.world_states:
+                # Use merged state (30% global, 70% entity)
+                self.backstory_states[key] = self.world_states[book].get_query_state(char, alpha=0.3)
             else:
                 self.bdh.reset_state()
                 self.backstory_states[key] = self.bdh.get_state()
                 
-        print(f"Mapped {len(self.backstory_states)} character-book pairs.")
+        print(f"Mapped {len(self.backstory_states)} character-book pairs with merged states.")
+    
+    def _entity_aware_ingest(self, text: str, entities: set) -> WorldState:
+        """
+        Stream-process text with entity-aware state routing.
+        
+        For each chunk:
+        1. ALWAYS update global state
+        2. IF entities mentioned: GATED update to entity states
+        
+        Hardening: Uses EntityWriteGate for scalar gating.
+        """
+        chunk_size = 512
+        
+        # Initialize states
+        self.bdh.reset_state()
+        initial_state = self.bdh.get_state().cpu()
+        
+        global_state = initial_state.clone()
+        entity_states = {e: initial_state.clone() for e in entities}
+        
+        # Review Fix #5: Track timestamps for temporal decay
+        entity_timestamps = {e: 0.0 for e in entities}
+        global_timestamp = 0.0
+        
+        entity_update_counts = {e: 0 for e in entities}
+        gate_values = {e: [] for e in entities}  # Track gate values for debugging
+        
+        # Initialize EntityWriteGate (learnable but used in inference mode here)
+        state_dim = initial_state.numel()
+        write_gate = EntityWriteGate(state_dim=64, proj_dim=32).to(self.device)
+        write_gate.eval()  # Don't train during ingestion
+        
+        current_time = 0.0
+        
+        with torch.no_grad():
+            for i in range(0, len(text), chunk_size):
+                chunk = text[i : i + chunk_size]
+                tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=self.device)
+                if tokens.size(1) == 0:
+                    continue
+                
+                current_time += 1.0  # Increment timestep
+                
+                # 1. ALWAYS update global state
+                self.bdh.reset_state()
+                self.bdh.set_state(global_state.detach().clone().to(self.device))
+                self.bdh(tokens, use_state=True)
+                global_state = self.bdh.get_state().cpu()
+                global_timestamp = current_time
+                
+                # 2. Detect entities in this chunk
+                chunk_lower = chunk.lower()
+                mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
+                
+                # Get chunk embedding for gating (use BDH output summary)
+                chunk_emb = global_state  # Proxy for chunk representation
+                
+                # 3. GATED update to relevant entity states
+                for entity in mentioned_entities:
+                    old_state = entity_states[entity].detach().clone()
+                    
+                    # Compute new state
+                    self.bdh.reset_state()
+                    self.bdh.set_state(old_state.to(self.device))
+                    self.bdh(tokens, use_state=True)
+                    new_state = self.bdh.get_state().cpu()
+                    
+                    # Compute gate (scalar in [0, 1])
+                    gate = write_gate(
+                        old_state.to(self.device), 
+                        chunk_emb.to(self.device), 
+                        global_state.to(self.device)
+                    ).item()
+                    
+                    # Gated update: entity_state = old + gate * (new - old)
+                    update = new_state - old_state
+                    entity_states[entity] = old_state + gate * update
+                    entity_timestamps[entity] = current_time
+                    
+                    entity_update_counts[entity] += 1
+                    gate_values[entity].append(gate)
+        
+        # Log entity update statistics with gate info
+        for entity, count in entity_update_counts.items():
+            if count > 0:
+                avg_gate = sum(gate_values[entity]) / len(gate_values[entity])
+                print(f"      {entity}: {count} updates, avg_gate={avg_gate:.3f}")
+        
+        # Attach timestamps to WorldState for temporal decay
+        world_state = WorldState(
+            global_state=global_state,
+            entity_states=entity_states,
+            known_entities=entities
+        )
+        # Store timestamps as attribute
+        world_state.entity_timestamps = entity_timestamps
+        world_state.global_timestamp = global_timestamp
+        
+        return world_state
 
     @modal.method()
     def verify_pipeline(self):
@@ -498,36 +931,96 @@ class NarrativeConsistencySystem:
 
     def predict_single(self, book_name, char_name, content):
         """
-        Predict consistency using Intinite Context (State-Space)
+        Predict consistency using Counterfactual Consistency Checking.
+        
+        Energy-Based World Model:
+        - If statement causes more surprise → CONTRADICT
+        - If negation causes more surprise → CONSISTENT
+        
+        Uses AdaptiveMerge for query-adaptive state blending.
         """
-        key = (book_name.strip(), char_name.strip())
+        book_name = book_name.strip()
+        char_name = char_name.strip()
+        key = (book_name, char_name)
+        
+        # Get world state and timestamps
+        query_time = 1000.0  # Query happens "at end of story"
+        fact_time = 0.0
         
         if key not in self.backstory_states:
-             # Try to load on fly if not precomputed
-             print(f"Loading state for {key} on demand...")
-             sentences = self.sentence_analyzer.extract_character_substory(book_name, char_name)
-             full_story = "".join(sentences)
-             if not full_story:
-                 state = None
-             else:
-                 state = self.absorb_story_stream(full_story).cpu()
-                 self.backstory_states[key] = state
+            # Try to get from world_states (entity-aware)
+            if book_name in self.world_states:
+                ws = self.world_states[book_name]
+                
+                # Get entity state and timestamp
+                if char_name in ws.entity_states:
+                    entity_state = ws.entity_states[char_name]
+                    fact_time = ws.entity_timestamps.get(char_name, 0.0) if hasattr(ws, 'entity_timestamps') else 0.0
+                else:
+                    entity_state = ws.global_state
+                    fact_time = ws.global_timestamp if hasattr(ws, 'global_timestamp') else 0.0
+                
+                # Use AdaptiveMerge instead of fixed 0.3/0.7
+                # For now, encode statement as simple embedding proxy
+                stmt_tokens = torch.tensor([[ord(c) % 256 for c in content[:50]]], dtype=torch.long, device=self.device)
+                with torch.no_grad():
+                    self.bdh.reset_state()
+                    self.bdh(stmt_tokens, use_state=False)
+                    stmt_emb = self.bdh.get_state()
+                
+                # Initialize AdaptiveMerge (using distributional summaries)
+                merge = AdaptiveMerge(state_dim=64, proj_dim=32).to(self.device)
+                merge.eval()
+                
+                with torch.no_grad():
+                    state = merge(
+                        stmt_emb.to(self.device),
+                        ws.global_state.to(self.device),
+                        entity_state.to(self.device)
+                    ).cpu()
+                
+                self.backstory_states[key] = state
+            else:
+                # Fallback: compute on demand
+                print(f"Loading state for {key} on demand...")
+                sentences = self.sentence_analyzer.extract_character_substory(book_name, char_name)
+                full_story = "".join(sentences)
+                if not full_story:
+                    state = None
+                else:
+                    state = self.absorb_story_stream(full_story).cpu()
+                    self.backstory_states[key] = state
         
-        if key in self.backstory_states:
-             state = self.backstory_states[key]
+        state = self.backstory_states.get(key)
+        
+        if state is None:
+            # No context available, default to consistent
+            return 0.5
+        
+        # Counterfactual Consistency Checking with temporal decay
+        checker = CounterfactualChecker(self.bdh, self.device)
+        negated = checker.negate(content)
+        
+        # Compute surprise with temporal decay (Review Fix #5)
+        surprise_S = checker.compute_surprise(content, state, fact_time=fact_time, query_time=query_time)
+        surprise_negS = checker.compute_surprise(negated, state, fact_time=fact_time, query_time=query_time)
+        
+        # Decision logic
+        epsilon = 1e-8
+        conflict_ratio = surprise_S / (surprise_negS + epsilon)
+        
+        if conflict_ratio > 1.0:
+            prediction = "contradict"
+            confidence = conflict_ratio
         else:
-             state = None
-              
-        # Inference
-        v_iso = self.encode_text([content], distinct_states=None)
-        v_ctx = self.encode_text([content], distinct_states=state)
+            prediction = "consistent"
+            confidence = 1.0 / (conflict_ratio + epsilon)
         
-        with torch.no_grad():
-            self.classifier.eval()
-            logits = self.classifier(v_iso, v_ctx)
-            prob = torch.softmax(logits, dim=1)[0][1].item()
-            
-        return prob
+        # Return probability (0 = contradict, 1 = consistent)
+        if prediction == "consistent":
+            return min(0.5 + confidence * 0.05, 1.0)  # Reduced scaling for stability
+        else:
+            return max(0.5 - confidence * 0.05, 0.0)  # Reduced scaling for stability
 
     @modal.method()
     def generate_submission(self):
