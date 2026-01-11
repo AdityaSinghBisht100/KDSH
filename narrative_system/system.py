@@ -178,21 +178,22 @@ class NarrativeConsistencySystem:
                 
         return self.bdh.get_state()
 
-    def precompute_backstory_states(self, train_df, test_mode=True):
+    def ingest_novel_knowledge(self, train_df, test_mode=True):
         """
-        ENTITY-AWARE WORLD STATE: Maintains per-entity BDH states.
+        PHASE 1: FEEEDING KNOWLEDGE.
+        Reads full novels to populate the Entity-Aware World State (Memory).
+        NO TRAINING occurs here (weights are not updated).
         """
-        print("Pre-computing Entity-Aware World States...")
+        print("\n=== Phase 1: Feeding Knowledge (Ingesting Novels) ===")
         
         self.bdh.eval()
         
         # Get unique books
         unique_books = train_df['book_name'].dropna().unique()
-        print(f"  Found {len(unique_books)} unique books to process.")
+        print(f"Found {len(unique_books)} unique books to ingest.")
         
         # Get all known entities (characters)
         all_entities = set(train_df['char'].dropna().str.strip().unique())
-        print(f"  Known entities: {len(all_entities)} characters")
         
         if test_mode:
             print("  >> TEST MODE: Using first 50,000 characters only <<")
@@ -216,18 +217,18 @@ class NarrativeConsistencySystem:
                      book_path = candidate
             
             if not book_path or not os.path.exists(book_path):
-                print(f"  -> Warning: Unknown book or file not found '{book_name}' in {self.data_dir}")
+                print(f"  -> Warning: Novel file not found for '{book_name}' in {self.data_dir}")
                 continue
                 
             try:
-                print(f"  Reading '{book_name}'...")
+                print(f"  📖 Feeding knowledge from '{book_name}'...")
                 with open(book_path, 'r', encoding='utf-8') as f:
                     full_text = f.read()
                 
                 if test_mode:
                     full_text = full_text[:50000]
                 
-                print(f"    -> Processing {len(full_text):,} characters with entity routing...")
+                print(f"    -> Ingesting {len(full_text):,} chars into Memory...")
                 
                 book_entities = set(
                     train_df[train_df['book_name'].str.strip() == book_name]['char']
@@ -236,14 +237,14 @@ class NarrativeConsistencySystem:
                 
                 world_state = self._entity_aware_ingest(full_text, book_entities)
                 self.world_states[book_name] = world_state
-                print(f"    -> Done! Global + {len(book_entities)} entity states created.")
+                print(f"    -> Done! Knowledge State updated for {len(book_entities)} characters.")
                 
             except Exception as e:
                 print(f"    -> Error: {e}")
                 import traceback
                 traceback.print_exc()
         
-        print(f"Computed WorldStates for {len(self.world_states)} books.")
+        print(f"Knowledge Ingestion Complete for {len(self.world_states)} books.")
         
         distinct_chars = train_df[['book_name', 'char']].drop_duplicates()
         
@@ -344,7 +345,7 @@ class NarrativeConsistencySystem:
             'label': ['Consistent', 'Consistent']
         }
         df = pd.DataFrame(data)
-        self.precompute_backstory_states(df, test_mode=True)
+        self.ingest_novel_knowledge(df, test_mode=True)
         print("Verification complete.")
 
     def filter_explicit_dataset(self, df):
@@ -510,13 +511,18 @@ class NarrativeConsistencySystem:
              test_df = train_df.copy() # Mock
              
         combined = pd.concat([train_df, test_df])
-        self.precompute_backstory_states(combined, test_mode=False)
+        self.ingest_novel_knowledge(combined, test_mode=False)
         
-        print("Training...")
+        print("\n=== Phase 2: Supervised Training (train.csv) ===")
+        print("Training model to detect consistency...")
         for epoch in range(epochs):
              loss = self.run_training_step(train_df)
              acc = self.evaluate_accuracy(test_df)
-             print(f"Epoch {epoch+1}: Loss={loss:.4f} Acc={acc:.2%}")
+             print(f"Epoch {epoch+1}/{epochs}: Loss={loss:.4f} Acc={acc:.2%}")
              
              torch.save(self.classifier.state_dict(), os.path.join(self.model_dir, "narrative_consistency.pt"))
              torch.save(self.bdh.state_dict(), os.path.join(self.model_dir, "bdh_base.pt"))
+             
+        print("\n=== Training Complete ===")
+        final_acc = self.evaluate_accuracy(test_df)
+        print(f"Final Model Accuracy on Dataset: {final_acc:.2%}")
