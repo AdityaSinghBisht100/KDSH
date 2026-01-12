@@ -566,3 +566,84 @@ class NarrativeConsistencySystem:
         print("\n=== Training Complete ===")
         final_acc = self.evaluate_accuracy(test_df)
         print(f"Final Model Accuracy on Dataset: {final_acc:.2%}")
+        if not os.path.exists(os.path.join(self.data_dir, "test.csv")):
+             print("(Note: Evaluated on train.csv since test.csv was not found)")
+
+    def generate_predictions(self, input_file="test.csv", output_file="predictions.csv"):
+        """Run batch inference on a CSV and save binary predictions."""
+        print(f"\n=== Generating Predictions for {input_file} ===")
+        self._initialize_components()
+        
+        train_path = os.path.join(self.data_dir, "train.csv")
+        dummy_df = pd.read_csv(train_path) if os.path.exists(train_path) else pd.DataFrame({'book_name': [], 'char': []})
+        self.ingest_novel_knowledge(dummy_df, test_mode=False)
+        
+        input_path = os.path.join(self.data_dir, input_file)
+        if not os.path.exists(input_path):
+            print(f"Error: Input file {input_path} not found.")
+            return
+
+        df = pd.read_csv(input_path)
+        print(f"Loaded {len(df)} samples.")
+        
+        results = []
+        self.bdh.eval()
+        self.classifier.eval()
+        
+        from tqdm import tqdm
+        with torch.no_grad():
+            for _, row in tqdm(df.iterrows(), total=len(df), desc="Predicting", unit="sample"):
+                book = row.get('book_name', '')
+                char = row.get('char', '')
+                content = row.get('content', '')
+                
+                score = self.predict_single(book, char, content)
+                pred_binary = 1 if score > 0.5 else 0
+                
+                results.append({
+                    'id': row.get('id', _),
+                    'prediction': pred_binary
+                })
+        
+        output_path = os.path.join(self.data_dir, output_file)
+        result_df = pd.DataFrame(results)
+        result_df.to_csv(output_path, index=False)
+        print(f"✅ Predictions saved to: {output_path}")
+        print(result_df.head())
+
+    def interactive_session(self):
+        """Run an interactive CLI session to query the model."""
+        print("\n=== KDSH Interactive Query Mode ===")
+        print("Type 'exit' or 'quit' to stop.\n")
+        self._initialize_components()
+        
+        while True:
+            try:
+                print("-" * 40)
+                book = input("Book Name (e.g. 'The Count of Monte Cristo'): ").strip()
+                if book.lower() in ['exit', 'quit']: break
+                
+                char = input("Character Name (e.g. 'Edmond Dantes'): ").strip()
+                if char.lower() in ['exit', 'quit']: break
+                
+                stmt = input("Statement to check: ").strip()
+                if stmt.lower() in ['exit', 'quit']: break
+                
+                if not book or not char or not stmt:
+                    print("Error: All fields are required.")
+                    continue
+                
+                print(f"\nAnalyzing consistency for {char} in '{book}'...")
+                score = self.predict_single(book, char, stmt)
+                
+                pred = "Consistent" if score > 0.5 else "Contradict"
+                confidence = score if score > 0.5 else 1 - score
+                
+                print(f"\nResult: {pred.upper()}")
+                print(f"Confidence (Score): {confidence:.2%} ({score:.4f})")
+                
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                print(f"Error: {e}")
+        print("\nGoodbye!")
