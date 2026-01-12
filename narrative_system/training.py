@@ -114,7 +114,7 @@ def evaluate_accuracy(system, test_df):
             content = row['content']
             label = row['label'].strip().lower()
             
-            score = system.predict_single(book, char, content)
+            score, _ = system.predict_single(book, char, content)
             
             pred = "consistent" if score > 0.5 else "contradict"
             if pred == label:
