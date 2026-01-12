@@ -40,15 +40,43 @@ def predict_single(system, book_name, char_name, content):
             score = probs[0, 1].item()
             
             # Rationale Generation
-            if score > 0.8:
+            # Rationale Generation
+            if score > 0.5:
+                # CONSISTENT
                 rationale = "High confidence consistency: Statement aligns strongly with world state."
-            elif score > 0.5:
-                rationale = "Weak consistency: Statement seems plausible but evidence is weak."
-            elif score > 0.2:
-                rationale = "Weak contradiction: Statement conflicts slightly with known facts."
             else:
+                # CONTRADICTION - Attempt Retrieval
                 rationale = "Strong contradiction: Statement directly opposes established world state."
                 
+                # Retrieval Logic
+                try:
+                    if book_name in system.world_states:
+                        ws = system.world_states[book_name]
+                        if hasattr(ws, 'entity_memories') and char_name in ws.entity_memories:
+                             memories = ws.entity_memories[char_name]
+                             if memories:
+                                 # Compute cosine similarity
+                                 # memories is list of (vec, text)
+                                 mem_vecs = torch.stack([m[0] for m in memories]).to(system.device) # [N, D]
+                                 
+                                 # Re-encode statement cleanly (detached)
+                                 system.bdh.reset_state()
+                                 stmt_tokens = torch.tensor([[ord(c) % 256 for c in content]], dtype=torch.long, device=system.device)
+                                 e_seq = system.bdh(stmt_tokens, use_state=False, return_embeddings=True)
+                                 stmt_vec = e_seq.mean(dim=1) # [1, D]
+                                 
+                                 sims = torch.nn.functional.cosine_similarity(stmt_vec, mem_vecs)
+                                 best_idx = torch.argmax(sims).item()
+                                 best_score = sims[best_idx].item()
+                                 
+                                 evidence_text = memories[best_idx][1]
+                                 
+                                 # If similarity is decent, use it
+                                 if best_score > 0.4:
+                                     rationale = f"Contradiction based on evidence: '{evidence_text}'"
+                except Exception as e:
+                    print(f"Retrieval failed: {e}")
+
             return score, rationale
 
 def generate_predictions(system, input_file="test.csv", output_file="predictions.csv"):

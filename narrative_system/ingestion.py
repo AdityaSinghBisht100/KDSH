@@ -123,6 +123,7 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
     
     entity_update_counts = {e: 0 for e in entities}
     gate_values = {e: [] for e in entities} 
+    entity_memories = {e: [] for e in entities} # New: Sentence Memory 
     
     state_dim = initial_state.numel()
     write_gate = EntityWriteGate(state_dim=64, proj_dim=32).to(system.device)
@@ -154,6 +155,30 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
                 mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
                 chunk_emb = global_state
                 
+                # New: Save sentence-level evidence
+                if mentioned_entities:
+                    # Simple sentence splitting
+                    sentences = [s.strip() for s in chunk.replace('?', '.').replace('!', '.').split('.') if len(s.split()) > 4]
+                    for sent in sentences:
+                        sent_lower = sent.lower()
+                        for entity in mentioned_entities:
+                            if entity.lower() in sent_lower:
+                                # Encode sentence as evidence (detached from graph)
+                                with torch.no_grad():
+                                    sent_tokens = torch.tensor([[ord(c) % 256 for c in sent]], dtype=torch.long, device=system.device)
+                                    if sent_tokens.size(1) > 0:
+                                        # Use system's encode mechanism or raw BDH (raw is simpler here as we just need vector)
+                                        # Use system.encode_text for consistency if possible, but we are inside ingestion.
+                                        # Let's simple-encode:
+                                        system.bdh.reset_state()
+                                        e_seq = system.bdh(sent_tokens, use_state=False, return_embeddings=True)
+                                        sent_vec = e_seq.mean(dim=1).cpu() # [1, D]
+                                        
+                                        # Limit memory to 200 items per entity to prevent explosion
+                                        if len(entity_memories[entity]) < 200:
+                                            entity_memories[entity].append((sent_vec, sent))
+
+                
                 for entity in mentioned_entities:
                     old_state = entity_states[entity].detach().clone()
                     
@@ -182,6 +207,7 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
         entity_states={k: v.detach() for k, v in entity_states.items()},
         known_entities=entities
     )
+    world_state.entity_memories = entity_memories
     world_state.entity_timestamps = entity_timestamps
     world_state.global_timestamp = global_timestamp
     

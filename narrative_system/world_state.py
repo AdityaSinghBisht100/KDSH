@@ -14,6 +14,10 @@ class WorldState:
     entity_states: Dict[str, torch.Tensor] = field(default_factory=dict)  # entity_id → BDH state
     known_entities: set = field(default_factory=set)  # All detected entity names
     
+    # New: Store raw text evidence for rationale retrieval
+    # map: entity -> list of (embedding_tensor, text_string)
+    entity_memories: Dict[str, list] = field(default_factory=lambda: {}) 
+    
     # Timestamps for temporal decay (added in recent update)
     entity_timestamps: Dict[str, float] = field(default_factory=dict)
     global_timestamp: float = 0.0
