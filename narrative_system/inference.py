@@ -20,7 +20,7 @@ def predict_single(system, book_name, char_name, content):
             else:
                 book_path = os.path.join(system.data_dir, f"{book_name}.txt")
                 if not os.path.exists(book_path):
-                    return 0.5 
+                    return 0.5, "Unknown book - Neutral confidence"
                 
                 with open(book_path, 'r', encoding='utf-8') as f:
                     text = f.read()
@@ -37,10 +37,22 @@ def predict_single(system, book_name, char_name, content):
     with torch.no_grad():
             logits = system.classifier(v_iso, v_ctx)
             probs = torch.softmax(logits, dim=1)
-            return probs[0, 1].item()
+            score = probs[0, 1].item()
+            
+            # Rationale Generation
+            if score > 0.8:
+                rationale = "High confidence consistency: Statement aligns strongly with world state."
+            elif score > 0.5:
+                rationale = "Weak consistency: Statement seems plausible but evidence is weak."
+            elif score > 0.2:
+                rationale = "Weak contradiction: Statement conflicts slightly with known facts."
+            else:
+                rationale = "Strong contradiction: Statement directly opposes established world state."
+                
+            return score, rationale
 
 def generate_predictions(system, input_file="test.csv", output_file="predictions.csv"):
-    """Run batch inference on a CSV and save binary predictions."""
+    """Run batch inference on a CSV and save binary predictions with rationale."""
     print(f"\n=== Generating Predictions for {input_file} ===")
     system._initialize_components()
     
@@ -69,15 +81,19 @@ def generate_predictions(system, input_file="test.csv", output_file="predictions
             content = row.get('content', '')
             
             # Note: calling predict_single from this module, passing system
-            score = predict_single(system, book, char, content)
+            score, rationale = predict_single(system, book, char, content)
             pred_binary = 1 if score > 0.5 else 0
             
             results.append({
                 'id': row.get('id', _),
-                'prediction': pred_binary
+                'prediction': pred_binary,
+                'rationale': rationale
             })
     
-    output_path = os.path.join(system.data_dir, output_file)
+    # OUTPUT PATH FIX: Use CWD if not specified otherwise
+    # If explicit output_file is provided, use it directly (relative to CWD)
+    output_path = output_file
+    
     result_df = pd.DataFrame(results)
     result_df.to_csv(output_path, index=False)
     print(f"✅ Predictions saved to: {output_path}")
@@ -106,16 +122,19 @@ def interactive_session(system):
                 continue
             
             print(f"\nAnalyzing consistency for {char} in '{book}'...")
-            score = predict_single(system, book, char, stmt)
+            score, rationale = predict_single(system, book, char, stmt)
             
             pred = "Consistent" if score > 0.5 else "Contradict"
             confidence = score if score > 0.5 else 1 - score
             
             print(f"\nResult: {pred.upper()}")
             print(f"Confidence (Score): {confidence:.2%} ({score:.4f})")
+            print(f"Rationale: {rationale}")
             
         except KeyboardInterrupt:
             break
         except Exception as e:
             print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
     print("\nGoodbye!")
