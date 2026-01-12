@@ -113,7 +113,7 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
     chunk_size = 2048 
     
     system.bdh.reset_state()
-    initial_state = system.bdh.get_state() # Keep on Device
+    initial_state = system.bdh.get_state().cpu()
     
     global_state = initial_state.clone()
     entity_states = {e: initial_state.clone() for e in entities}
@@ -135,7 +135,7 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
     total_chunks = (len(text) + chunk_size - 1) // chunk_size
     
     with torch.no_grad():
-        with tqdm(total=total_chunks, desc="  Processing Chunks (GPU)", unit="chunk", leave=False) as pbar:
+        with tqdm(total=total_chunks, desc="  Processing Chunks", unit="chunk", leave=False) as pbar:
             for i in range(0, len(text), chunk_size):
                 chunk = text[i : i + chunk_size]
                 tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=system.device)
@@ -146,9 +146,9 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
                 current_time += 1.0
                 
                 system.bdh.reset_state()
-                system.bdh.set_state(global_state.detach().clone()) # On Device
+                system.bdh.set_state(global_state.detach().clone().to(system.device))
                 system.bdh(tokens, use_state=True)
-                global_state = system.bdh.get_state() # Keep on Device
+                global_state = system.bdh.get_state().cpu()
                 global_timestamp = current_time
                 
                 chunk_lower = chunk.lower()
@@ -167,10 +167,14 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
                                 with torch.no_grad():
                                     sent_tokens = torch.tensor([[ord(c) % 256 for c in sent]], dtype=torch.long, device=system.device)
                                     if sent_tokens.size(1) > 0:
+                                        # Use system's encode mechanism or raw BDH (raw is simpler here as we just need vector)
+                                        # Use system.encode_text for consistency if possible, but we are inside ingestion.
+                                        # Let's simple-encode:
                                         system.bdh.reset_state()
                                         e_seq = system.bdh(sent_tokens, use_state=False, return_embeddings=True)
-                                        sent_vec = e_seq.mean(dim=1) # Keep on Device [1, D]
+                                        sent_vec = e_seq.mean(dim=1).cpu() # [1, D]
                                         
+                                        # Limit memory to 200 items per entity to prevent explosion
                                         if len(entity_memories[entity]) < 200:
                                             entity_memories[entity].append((sent_vec, sent))
 
@@ -179,14 +183,14 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
                     old_state = entity_states[entity].detach().clone()
                     
                     system.bdh.reset_state()
-                    system.bdh.set_state(old_state) # On Device
+                    system.bdh.set_state(old_state.to(system.device))
                     system.bdh(tokens, use_state=True)
-                    new_state = system.bdh.get_state() # On Device
+                    new_state = system.bdh.get_state().cpu()
                     
                     gate = write_gate(
-                        old_state,
-                        chunk_emb, 
-                        global_state
+                        old_state.to(system.device), 
+                        chunk_emb.to(system.device), 
+                        global_state.to(system.device)
                     ).item()
                     
                     update = new_state - old_state
@@ -198,18 +202,12 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
                 
                 pbar.update(1)
     
-    # Move to CPU only at the very end for storage efficiency
     world_state = WorldState(
-        global_state=global_state.detach().cpu(),
-        entity_states={k: v.detach().cpu() for k, v in entity_states.items()},
+        global_state=global_state.detach(),
+        entity_states={k: v.detach() for k, v in entity_states.items()},
         known_entities=entities
     )
-    # Move memories to CPU for storage
-    cpu_memories = {}
-    for e, mems in entity_memories.items():
-        cpu_memories[e] = [(v.detach().cpu(), t) for v, t in mems]
-        
-    world_state.entity_memories = cpu_memories
+    world_state.entity_memories = entity_memories
     world_state.entity_timestamps = entity_timestamps
     world_state.global_timestamp = global_timestamp
     
