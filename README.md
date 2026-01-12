@@ -1,95 +1,102 @@
-# Baby Dragon Hatchling
+# Narrative Consistency System
 
-## **Bridging the Gap Between Transformers and the Brain**
-
-**Baby Dragon Hatchling (BDH)** is a biologically inspired large language model architecture that connects principles of deep learning with the foundations of neuroscience. Developed by researchers at [Pathway](https://pathway.com), BDH provides a theoretical and practical framework for understanding the emergence of reasoning and generalization in artificial systems.
-
-This repository contains the official implementation from the paper:
-> *A. Kosowski, P. Uznański, J. Chorowski, Z. Stamirowska, M. Bartoszkiewicz.*
-> [_The Dragon Hatchling: The Missing Link between the Transformer and Models of the Brain_](https://doi.org/10.48550/arXiv.2509.26507), arXiv (2025).
-
+A retrieval-augmented, energy-based architecture for detecting plot contradictions in long-form narratives. This system leverages **Entity-Aware World Modeling** and **Contrastive Energy** checks to identify when new statements contradict established backstory.
 
 ## Overview
 
-BDH represents a **scale-free, locally interacting network of neurons** capable of intrinsic reasoning dynamics. BDH scales like a Transformer on performance benchmarks—yet retains full interpretability and theoretical grounding in the fine-grained dynamics of neuron interactions.
-
-**Key properties:**
-
-- **Scale-free network topology** mimicking biological connectivity
-- **Locally interacting neuron particles** with excitatory/inhibitory dynamics
-- **Hebbian working memory** based on synaptic plasticity, displaying monosemanticity
-- **GPU-friendly state-space formulation** for efficient implementation
-- **Interpretable activations** that are sparse and positive
-
-BDH formalizes a bridge between **neural computation and machine-based language understanding**. It shows how **macro reasoning behavior** in large AI models emerges from **micro-level neuron dynamics**, guided by principles of graph theory and local computation.
-
-Empirically, BDH matches **GPT-2–scale Transformers** across language and translation tasks at equivalent parameter scales (10M–1B).
-
-
-***
+The goal of this system is to maintain a consistent "World State" for a narrative universe. As new text (novels, chapters) is ingested, the system updates its internal representation of the world and its characters. When new statements are proposed, the system evaluates their consistency against this world state using an energy-based metric.
 
 ## Architecture
 
-<img src="figs/architecture.png" width="600"/>
+```mermaid
+graph TD
+    subgraph Ingestion ["Phase 1: Knowledge Ingestion"]
+    Text[Novel Text] --> Filter{Entity Filter}
+    Filter -->|General Context| Global[Global State]
+    Filter -->|Character Mentions| Entity[Entity States]
+    end
 
-***
-
-## Relation to Transformers
-
-<img src="figs/vocab.png" width="600"/>
-
-BDH and the Transformer share attention-inspired computation; however, BDH’s graph-based architecture makes its attention **emerge naturally from neuron-level interactions**, reflecting attention as seen in biological systems.
-
-***
-
-## Scaling Laws
-
-<img src="figs/bdh_scaling.png" width="600"/>
-
-BDH follows **Transformer-like scaling laws**, maintaining parameter efficiency while achieving interpretability at any scale.
-
-***
-
-## Installation and Training
-
-```bash
-# install dependencies
-pip install -r requirements.txt
-
-# train BDH on a toy dataset
-python train.py
+    subgraph Inference ["Phase 2: Consistency Checking"]
+    Query[Statement S] --> Neg[Negation ¬S]
+    
+    Global -.->|Adaptive Merge| Context
+    Entity -.->|Adaptive Merge| Context
+    
+    Context --> Surprise1
+    Context --> Surprise2
+    
+    Query -->|Compute Surprise| Surprise1[Energy E_S]
+    Neg -->|Compute Surprise| Surprise2[Energy E_¬S]
+    
+    Surprise1 -- vs --> Comparer{Comparator}
+    Surprise2 --> Comparer
+    
+    Comparer -->|E_S << E_¬S| Res1[Consistent]
+    Comparer -->|E_S >> E_¬S| Res2[Contradiction]
+    end
 ```
 
-<!--For visualization and interpretability analysis, explore the example notebooks in `notebooks/`.-->
+The system is built on three core pillars:
 
+### 1. Entity-Aware World State
+Standard language models often entangle facts into a single global state. This architecture maintains:
+- **Global State**: Captures general narrative context and timeline.
+- **Entity States**: Dedicated `BDH` (Baby Dragon Hatchling) neural states for each character.
+- **Adaptive Merging**: A learned mechanism that dynamically combines the Global State and relevant Entity State based on the query.
 
+### 2. Pure Infinite Context (BDH)
+Instead of a fixed context window, the system uses the **Baby Dragon Hatchling (BDH)** architecture. BDH is a scale-free, state-space model that allows for effectively infinite context retention by maintaining a compressed, evolving neural state rather than storing all past tokens.
 
-## Learn and Discuss
+### 3. Contrastive Energy-Based Consistency
+To detect contradictions, we avoid simple binary classification. Instead, we use a **Counterfactual Energy** approach:
+1. **Statement $S$**: "Alice was in Paris."
+2. **Negation $\neg S$**: "Alice was NOT in Paris."
+3. **Surprise (Energy) Calculation**: The system computes how "surprised" the World State is by both $S$ and $\neg S$.
+4. **Logic**:
+   - If $E(S) \gg E(\neg S)$, the statement contradicts the backstory.
+   - If $E(S) \ll E(\neg S)$, the statement is consistent.
 
-- Watch the *SuperDataScience podcast* [▶️ *Dragon Hatchling: The Missing Link Between Transformers and the Brain*](https://www.youtube.com/watch?v=mfV44-mtg7c) (72 min.) featuring Adrian Kosowski in conversation with Jon Krohn, unpacking BDH’s neuron-level architecture and sparse reasoning dynamics.
+## System Components
 
-- Read about BDH in
-[*Forbes*](https://www.forbes.com/sites/victordey/2025/10/08/can-ai-learn-and-evolve-like-a-brain-pathways-bold-research-thinks-so/),
-[*Semafor*](https://www.semafor.com/article/10/01/2025/new-ai-research-claims-to-be-getting-closer-to-modeling-human-brain),
-[*The Turing Post*](https://www.turingpost.com/p/fod-121-300-million-to-start-a-big-promise-for-science#the-freshest-research-papers-catego),
-[*Quantum Zeitgeist*](https://quantumzeitgeist.com/palo-alto-ai-firm-pathway-unveils-post-transformer-architecture-for-autonomous-ai/),
-[*Golem*](https://www.golem.de/news/neue-ki-architektur-was-ist-baby-dragon-hatchling-2510-201047-2.html),
-and elsewhere in the media.
+The codebase is modularized into the `narrative_system` package:
 
-- Discuss and share the BDH paper on:
-[*Hugging Face Papers*](https://huggingface.co/papers/2509.26507), 
-[*Alphaxiv*](https://alphaxiv.org/abs/2509.26507),
-and [*EmergentMind*](https://emergentmind.com/papers/2509.26507).
+- **`system.py`**: The central controller (`NarrativeConsistencySystem`) that orchestrates components.
+- **`world_state.py`**: Defines the `WorldState` data structure and the `AdaptiveMerge` mechanism.
+- **`ingestion.py`**: Handles the reading of novels and the routing of text to update specific Entity States (`_entity_aware_ingest`).
+- **`models.py`**: Contains the `CoherenceClassifier` and `HybridCoherenceClassifier` definitions.
+- **`inference.py`**: Logic for predicting consistency scores (`predict_single`).
+- **`training.py`**: Routines for supervising the classifier using known contradictions.
 
-## Community Projects
+## Installation
 
-- [adamskrodzki/bdh](https://github.com/adamskrodzki/bdh): dynamic vocabulary, stateful attention
-- [mosure/burn_dragon_hatchling](https://github.com/mosure/burn_dragon_hatchling): Burn port
-- [severian42/bdh](https://github.com/severian42/bdh): MLX port
-- [Git-Faisal/bdh](https://github.com/Git-Faisal/bdh)
-- [GrahLnn/bdh](https://github.com/GrahLnn/bdh)
+```bash
+pip install -r requirements.txt
+```
 
-## Acknowledgements
-We thank Andrej Karpathy for the [nanoGPT](https://github.com/karpathy/nanoGPT/) code and the tiny Shapespeare dataset used in this demonstration.
+## Usage
 
-BDH research stands at the intersection of **AI architecture**, **biological learning models**, and **theoretical computer science**—an effort to map the *equations of reasoning* between artificial and biological intelligence.
+The system is controlled via `main.py`.
+
+### 1. Training
+Trains the coherence classifier to distinguish consistency based on the ingested world state.
+```bash
+python main.py --train --epochs 5 --data_dir ./files
+```
+
+### 2. Testing / Inference
+Generates predictions for a CSV of statements.
+```bash
+python main.py --test --data_dir ./files
+```
+
+### 3. Interactive Mode
+Query the system manually to check specific facts.
+```bash
+python main.py --interactive
+```
+
+### 4. Verification
+Runs an internal pipeline check.
+```bash
+python main.py --verify
+```
