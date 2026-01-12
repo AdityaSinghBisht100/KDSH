@@ -92,10 +92,16 @@ class NarrativeConsistencySystem:
                 print("Loaded classifier weights (strict=False).")
             except Exception as e:
                 print(f"Weights load failed: {e}")
+        else:
+            print(f"⚠️  MODEL NOT FOUND: {weights_path}")
+            print(f"    Please download 'narrative_consistency.pt' and 'bdh_base.pt' from Google Drive")
+            print(f"    and place them in the '{self.model_dir}' folder.")
                 
         bdh_path = os.path.join(self.model_dir, "bdh_base.pt")
         if os.path.exists(bdh_path):
              self.bdh.load_state_dict(torch.load(bdh_path, map_location=self.device), strict=False)
+        else:
+             print(f"⚠️  BDH BASE NOT FOUND: {bdh_path}")
 
         # Import and initialize sentence analyzer
         from sentence_analyzer import SentenceAnalyzer

@@ -67,6 +67,17 @@ The codebase is modularized into the `narrative_system` package:
 - **`inference.py`**: Logic for predicting consistency scores (`predict_single`).
 - **`training.py`**: Routines for supervising the classifier using known contradictions.
 
+
+## Setup & Models
+
+Before running the system, you must ensure the pre-trained checkpoints are available.
+
+1.  **Create Directory**: Ensure a `models/` folder exists in the project root.
+2.  **Download Checkpoints**: Download the required files from this [Google Drive Link](https://drive.google.com/drive/folders/1E1iVPSH7ELFddX09CXfL-9kJIpe6VoTc?usp=sharing) and place them in `models/`:
+    - `narrative_consistency.pt`
+    - `bdh_base.pt`
+    - `world_state_cache.pt` (if available)
+
 ## Installation
 
 ```bash
