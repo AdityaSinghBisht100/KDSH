@@ -13,7 +13,9 @@ from narrative_system import NarrativeConsistencySystem
 def main():
     parser = argparse.ArgumentParser(description="KDSH Narrative Consistency System")
     parser.add_argument("--verify", action="store_true", help="Run verification pipeline")
+    parser.add_argument("--interactive", action="store_true", help="Run interactive query session")
     parser.add_argument("--train", action="store_true", help="Run training loop")
+    parser.add_argument("--test", action="store_true", help="Generate predictions for test.csv")
     parser.add_argument("--data_dir", type=str, default="./files", help="Directory containing train.csv and book .txt files")
     parser.add_argument("--model_dir", type=str, default="./models", help="Directory to save/load models")
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
@@ -33,12 +35,20 @@ def main():
     elif args.train:
         print("Running training...")
         system.train(epochs=args.epochs)
+
+    elif args.test:
+        system.generate_predictions(input_file="test.csv", output_file="predictions.csv")
+        
+    elif args.interactive:
+        system.interactive_session()
         
     else:
         print("System ready.")
         print("Usage:")
         print("  python main.py --verify")
-        print("  python main.py --train --data_dir /path/to/data --epochs 10")
+        print("  python main.py --train")
+        print("  python main.py --test")
+        print("  python main.py --interactive")
         
 if __name__ == "__main__":
     main()
