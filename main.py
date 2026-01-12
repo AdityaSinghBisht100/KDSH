@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--data_dir", type=str, default="./files", help="Directory containing train.csv and book .txt files")
     parser.add_argument("--model_dir", type=str, default="./models", help="Directory to save/load models")
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
+    parser.add_argument("--output_file", type=str, default="predictions.csv", help="Output CSV filename")
     
     args = parser.parse_args()
     
@@ -37,7 +38,7 @@ def main():
         system.train(epochs=args.epochs)
 
     elif args.test:
-        system.generate_predictions(input_file="test.csv", output_file="predictions.csv")
+        system.generate_predictions(input_file="test.csv", output_file=args.output_file)
         
     elif args.interactive:
         system.interactive_session()
