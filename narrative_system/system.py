@@ -180,190 +180,13 @@ class NarrativeConsistencySystem:
         return self.bdh.get_state()
 
     def ingest_novel_knowledge(self, train_df, test_mode=True):
-        """
-        PHASE 1: FEEEDING KNOWLEDGE.
-        Reads full novels to populate the Entity-Aware World State (Memory).
-        NO TRAINING occurs here (weights are not updated).
-        """
-        print("\n=== Phase 1: Feeding Knowledge (Ingesting Novels) ===")
-        
-        cache_path = os.path.join(self.model_dir, "world_state_cache.pt")
-        if os.path.exists(cache_path) and not test_mode:
-            print(f"  ✨ Found cached World State at {cache_path}")
-            print(f"  ✨ Loading knowledge from disk (skipping raw text ingestion)...")
-            try:
-                cached_data = torch.load(cache_path)
-                self.world_states = cached_data['world_states']
-                self.backstory_states = cached_data['backstory_states']
-                print(f"  ✅ Loaded state for {len(self.world_states)} books. Jumping to Phase 2.")
-                return
-            except Exception as e:
-                print(f"  ⚠️ Error loading cache: {e}. Re-ingesting...")
-        
-        self.bdh.eval()
-        
-        # Get unique books
-        unique_books = train_df['book_name'].dropna().unique()
-        print(f"Found {len(unique_books)} unique books to ingest.")
-        
-        # Get all known entities (characters)
-        all_entities = set(train_df['char'].dropna().str.strip().unique())
-        
-        if test_mode:
-            print("  >> TEST MODE: Using first 50,000 characters only <<")
-        
-        # Book paths mapping
-        book_paths = {
-            "The Count of Monte Cristo": os.path.join(self.data_dir, "The Count of Monte Cristo.txt"),
-            "In Search of the Castaways": os.path.join(self.data_dir, "In search of the castaways.txt")
-        }
-        
-        # Process each book
-        for book_name in unique_books:
-            book_name = str(book_name).strip()
-            # Try specific map first, then generic in data_dir
-            book_path = book_paths.get(book_name)
-            
-            if not book_path or not os.path.exists(book_path):
-                 # Try direct filename match
-                 candidate = os.path.join(self.data_dir, f"{book_name}.txt")
-                 if os.path.exists(candidate):
-                     book_path = candidate
-            
-            if not book_path or not os.path.exists(book_path):
-                print(f"  -> Warning: Novel file not found for '{book_name}' in {self.data_dir}")
-                continue
-                
-            try:
-                print(f"  📖 Feeding knowledge from '{book_name}'...")
-                with open(book_path, 'r', encoding='utf-8') as f:
-                    full_text = f.read()
-                
-                if test_mode:
-                    full_text = full_text[:50000]
-                
-                print(f"    -> Ingesting {len(full_text):,} chars into Memory...")
-                
-                book_entities = set(
-                    train_df[train_df['book_name'].str.strip() == book_name]['char']
-                    .dropna().str.strip().unique()
-                )
-                
-                world_state = self._entity_aware_ingest(full_text, book_entities)
-                self.world_states[book_name] = world_state
-                print(f"    -> Done! Knowledge State updated for {len(book_entities)} characters.")
-                
-            except Exception as e:
-                print(f"    -> Error: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        print(f"Knowledge Ingestion Complete for {len(self.world_states)} books.")
-        
-        distinct_chars = train_df[['book_name', 'char']].drop_duplicates()
-        
-        for _, row in distinct_chars.iterrows():
-            if pd.isna(row['book_name']) or pd.isna(row['char']):
-                continue
-            book = str(row['book_name']).strip()
-            char = str(row['char']).strip()
-            key = (book, char)
-            
-            if book in self.world_states:
-                self.backstory_states[key] = self.world_states[book].get_query_state(char, alpha=0.3)
-            else:
-                self.bdh.reset_state()
-                self.backstory_states[key] = self.bdh.get_state()
-                
-        print(f"Mapped {len(self.backstory_states)} character-book pairs with merged states.")
-        
-        # SAVE CACHE
-        if not test_mode:
-            print("  💾 Saving World State cache to disk...")
-            torch.save({
-                'world_states': self.world_states,
-                'backstory_states': self.backstory_states
-            }, cache_path)
-            print("  ✅ Cache saved.")
-    
+        from .ingestion import ingest_novel_knowledge
+        ingest_novel_knowledge(self, train_df, test_mode)
+
     def _entity_aware_ingest(self, text: str, entities: set) -> WorldState:
-        # Optimization: Larger chunk size for faster ingestion on GPU
-        chunk_size = 2048 # Was 512
-        
-        self.bdh.reset_state()
-        initial_state = self.bdh.get_state().cpu()
-        
-        global_state = initial_state.clone()
-        entity_states = {e: initial_state.clone() for e in entities}
-        
-        entity_timestamps = {e: 0.0 for e in entities}
-        global_timestamp = 0.0
-        
-        entity_update_counts = {e: 0 for e in entities}
-        gate_values = {e: [] for e in entities} 
-        
-        state_dim = initial_state.numel()
-        write_gate = EntityWriteGate(state_dim=64, proj_dim=32).to(self.device)
-        write_gate.eval() 
-        
-        current_time = 0.0
-        
-        # Calculate total chunks for progress bar
-        total_chunks = (len(text) + chunk_size - 1) // chunk_size
-        
-        with torch.no_grad():
-            with tqdm(total=total_chunks, desc="  Processing Chunks", unit="chunk", leave=False) as pbar:
-                for i in range(0, len(text), chunk_size):
-                    chunk = text[i : i + chunk_size]
-                    tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=self.device)
-                    if tokens.size(1) == 0:
-                        pbar.update(1)
-                        continue
-                    
-                    current_time += 1.0
-                    
-                    self.bdh.reset_state()
-                    self.bdh.set_state(global_state.detach().clone().to(self.device))
-                    self.bdh(tokens, use_state=True)
-                    global_state = self.bdh.get_state().cpu()
-                    global_timestamp = current_time
-                    
-                    chunk_lower = chunk.lower()
-                    mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
-                    chunk_emb = global_state
-                    
-                    for entity in mentioned_entities:
-                        old_state = entity_states[entity].detach().clone()
-                        
-                        self.bdh.reset_state()
-                        self.bdh.set_state(old_state.to(self.device))
-                        self.bdh(tokens, use_state=True)
-                        new_state = self.bdh.get_state().cpu()
-                        
-                        gate = write_gate(
-                            old_state.to(self.device), 
-                            chunk_emb.to(self.device), 
-                            global_state.to(self.device)
-                        ).item()
-                        
-                        update = new_state - old_state
-                        entity_states[entity] = old_state + gate * update
-                        entity_timestamps[entity] = current_time
-                        
-                        entity_update_counts[entity] += 1
-                        gate_values[entity].append(gate)
-                    
-                    pbar.update(1)
-        
-        world_state = WorldState(
-            global_state=global_state.detach(),
-            entity_states={k: v.detach() for k, v in entity_states.items()},
-            known_entities=entities
-        )
-        world_state.entity_timestamps = entity_timestamps
-        world_state.global_timestamp = global_timestamp
-        
-        return world_state
+        # This is now internal to ingestion.py, but if called by other methods, we proxy it
+        from .ingestion import _entity_aware_ingest
+        return _entity_aware_ingest(self, text, entities)
 
     def verify_pipeline(self):
         print("=== Running Internal Verification ===")
@@ -380,6 +203,7 @@ class NarrativeConsistencySystem:
         print("Verification complete.")
 
     def filter_explicit_dataset(self, df):
+        # Kept locally or could be moved to utils
         """Step 1: Restrict task to EXPLICIT contradictions."""
         print("Step 1: Filtering for EXPLICIT contradictions...")
         valid_indices = []
@@ -420,230 +244,25 @@ class NarrativeConsistencySystem:
         return filtered
 
     def evaluate_accuracy(self, test_df):
-        correct = 0
-        total = 0
-        self.bdh.eval()
-        self.classifier.eval()
-        
-        if hasattr(self, 'hybrid_classifier') and self.hybrid_classifier is not None:
-             self.hybrid_classifier.eval()
-        
-        with torch.no_grad():
-            for _, row in test_df.iterrows():
-                book = row['book_name']
-                char = row['char']
-                content = row['content']
-                label = row['label'].strip().lower()
-                
-                score = self.predict_single(book, char, content)
-                
-                pred = "consistent" if score > 0.5 else "contradict"
-                if pred == label:
-                    correct += 1
-                total += 1
-                
-        return correct / total if total > 0 else 0
+        from .training import evaluate_accuracy
+        return evaluate_accuracy(self, test_df)
 
     def run_training_step(self, train_df, batch_size=4):
-        self.classifier.train()
-        self.bdh.train()
-        total_loss = 0
-        
-        optimizer = torch.optim.Adam(
-            list(self.classifier.parameters()) + list(self.bdh.parameters()),
-            lr=1e-4
-        )
-        criterion = nn.CrossEntropyLoss()
-        
-        # Progress bar for training batches
-        num_batches = (len(train_df) + batch_size - 1) // batch_size
-        pbar = tqdm(total=num_batches, desc="Training Batches", unit="batch", leave=False)
-        
-        for start_idx in range(0, len(train_df), batch_size):
-            batch = train_df.iloc[start_idx : start_idx + batch_size]
-            if len(batch) < 2: 
-                pbar.update(1)
-                continue
-            
-            contents = batch['content'].tolist()
-            labels = torch.tensor(
-                [1 if l.strip().lower() == 'consistent' else 0 for l in batch['label']],
-                device=self.device
-            )
-            
-            states = []
-            for _, row in batch.iterrows():
-                key = (row['book_name'].strip(), row['char'].strip())
-                if key in self.backstory_states:
-                    states.append(self.backstory_states[key].to(self.device))
-                else:
-                    self.bdh.reset_state()
-                    states.append(self.bdh.get_state())
-
-            v_iso = self.encode_text(contents, distinct_states=None)
-            v_ctx = self.encode_text(contents, distinct_states=states)
-            
-            optimizer.zero_grad()
-            logits = self.classifier(v_iso, v_ctx)
-            
-            ce_loss = criterion(logits, labels)
-            # Simple loss for now, removed complexity for basic cluster run reliability
-            loss = ce_loss 
-            
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            pbar.update(1)
-            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
-            
-        pbar.close()
-        return total_loss / max(1, len(train_df) // batch_size)
+        from .training import run_training_step
+        return run_training_step(self, train_df, batch_size)
 
     def predict_single(self, book_name, char_name, content):
-        book_name = book_name.strip()
-        char_name = char_name.strip()
-        key = (book_name, char_name)
-        
-        if self.bdh is None: self._initialize_components()
-        
-        if key not in self.backstory_states:
-             if book_name in self.world_states:
-                 ws = self.world_states[book_name]
-                 state = ws.get_query_state(char_name)
-                 self.backstory_states[key] = state.to(self.device)
-             else:
-                 book_path = os.path.join(self.data_dir, f"{book_name}.txt")
-                 if not os.path.exists(book_path):
-                      return 0.5 
-                 
-                 with open(book_path, 'r', encoding='utf-8') as f:
-                      text = f.read()
-                 self.bdh.reset_state()
-                 self.absorb_story_stream(text[:10000])
-                 state = self.bdh.get_state()
-                 self.backstory_states[key] = state
-
-        state = self.backstory_states[key].to(self.device)
-        
-        v_iso = self.encode_text([content], distinct_states=None)
-        v_ctx = self.encode_text([content], distinct_states=state)
-        
-        with torch.no_grad():
-             logits = self.classifier(v_iso, v_ctx)
-             probs = torch.softmax(logits, dim=1)
-             return probs[0, 1].item()
+        from .inference import predict_single
+        return predict_single(self, book_name, char_name, content)
 
     def train(self, epochs=5):
-        print(f"Starting Training on {self.device}...")
-        self._initialize_components()
-        
-        train_path = os.path.join(self.data_dir, "train.csv")
-        test_path = os.path.join(self.data_dir, "test.csv")
-        
-        if not os.path.exists(train_path):
-             print(f"Train file not found at {train_path}")
-             return
-             
-        train_df = pd.read_csv(train_path)
-        if os.path.exists(test_path):
-             test_df = pd.read_csv(test_path)
-        else:
-             test_df = train_df.copy() # Mock
-             
-        combined = pd.concat([train_df, test_df])
-        self.ingest_novel_knowledge(combined, test_mode=False)
-        
-        print("\n=== Phase 2: Supervised Training (train.csv) ===")
-        print("Training model to detect consistency...")
-        for epoch in range(epochs):
-             loss = self.run_training_step(train_df)
-             acc = self.evaluate_accuracy(test_df)
-             print(f"Epoch {epoch+1}/{epochs}: Loss={loss:.4f} Acc={acc:.2%}")
-             
-             torch.save(self.classifier.state_dict(), os.path.join(self.model_dir, "narrative_consistency.pt"))
-             torch.save(self.bdh.state_dict(), os.path.join(self.model_dir, "bdh_base.pt"))
-             
-        print("\n=== Training Complete ===")
-        final_acc = self.evaluate_accuracy(test_df)
-        print(f"Final Model Accuracy on Dataset: {final_acc:.2%}")
-        if not os.path.exists(os.path.join(self.data_dir, "test.csv")):
-             print("(Note: Evaluated on train.csv since test.csv was not found)")
+        from .training import train
+        train(self, epochs)
 
     def generate_predictions(self, input_file="test.csv", output_file="predictions.csv"):
-        """Run batch inference on a CSV and save binary predictions."""
-        print(f"\n=== Generating Predictions for {input_file} ===")
-        self._initialize_components()
-        
-        train_path = os.path.join(self.data_dir, "train.csv")
-        dummy_df = pd.read_csv(train_path) if os.path.exists(train_path) else pd.DataFrame({'book_name': [], 'char': []})
-        self.ingest_novel_knowledge(dummy_df, test_mode=False)
-        
-        input_path = os.path.join(self.data_dir, input_file)
-        if not os.path.exists(input_path):
-            print(f"Error: Input file {input_path} not found.")
-            return
-
-        df = pd.read_csv(input_path)
-        print(f"Loaded {len(df)} samples.")
-        
-        results = []
-        self.bdh.eval()
-        self.classifier.eval()
-        
-        from tqdm import tqdm
-        with torch.no_grad():
-            for _, row in tqdm(df.iterrows(), total=len(df), desc="Predicting", unit="sample"):
-                book = row.get('book_name', '')
-                char = row.get('char', '')
-                content = row.get('content', '')
-                
-                score = self.predict_single(book, char, content)
-                pred_binary = 1 if score > 0.5 else 0
-                
-                results.append({
-                    'id': row.get('id', _),
-                    'prediction': pred_binary
-                })
-        
-        output_path = os.path.join(self.data_dir, output_file)
-        result_df = pd.DataFrame(results)
-        result_df.to_csv(output_path, index=False)
-        print(f"✅ Predictions saved to: {output_path}")
-        print(result_df.head())
+        from .inference import generate_predictions
+        generate_predictions(self, input_file, output_file)
 
     def interactive_session(self):
-        """Run an interactive CLI session to query the model."""
-        print("\n=== KDSH Interactive Query Mode ===")
-        print("Type 'exit' or 'quit' to stop.\n")
-        self._initialize_components()
-        
-        while True:
-            try:
-                print("-" * 40)
-                book = input("Book Name (e.g. 'The Count of Monte Cristo'): ").strip()
-                if book.lower() in ['exit', 'quit']: break
-                
-                char = input("Character Name (e.g. 'Edmond Dantes'): ").strip()
-                if char.lower() in ['exit', 'quit']: break
-                
-                stmt = input("Statement to check: ").strip()
-                if stmt.lower() in ['exit', 'quit']: break
-                
-                if not book or not char or not stmt:
-                    print("Error: All fields are required.")
-                    continue
-                
-                print(f"\nAnalyzing consistency for {char} in '{book}'...")
-                score = self.predict_single(book, char, stmt)
-                
-                pred = "Consistent" if score > 0.5 else "Contradict"
-                confidence = score if score > 0.5 else 1 - score
-                
-                print(f"\nResult: {pred.upper()}")
-                print(f"Confidence (Score): {confidence:.2%} ({score:.4f})")
-                
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                print(f"Error: {e}")
-        print("\nGoodbye!")
+        from .inference import interactive_session
+        interactive_session(self)

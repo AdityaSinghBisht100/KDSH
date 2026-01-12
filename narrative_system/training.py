@@ -1,0 +1,124 @@
+
+import os
+import torch
+import torch.nn as nn
+import pandas as pd
+from tqdm import tqdm
+from .ingestion import ingest_novel_knowledge
+
+def train(system, epochs=5):
+    print(f"Starting Training on {system.device}...")
+    system._initialize_components()
+    
+    train_path = os.path.join(system.data_dir, "train.csv")
+    test_path = os.path.join(system.data_dir, "test.csv")
+    
+    if not os.path.exists(train_path):
+            print(f"Train file not found at {train_path}")
+            return
+            
+    train_df = pd.read_csv(train_path)
+    if os.path.exists(test_path):
+            test_df = pd.read_csv(test_path)
+    else:
+            test_df = train_df.copy() # Mock
+            
+    combined = pd.concat([train_df, test_df])
+    # Call the ingestion logic (which is now in system wrapper but delegates to ingestion.py)
+    # Or call directly:
+    ingest_novel_knowledge(system, combined, test_mode=False)
+    
+    print("\n=== Phase 2: Supervised Training (train.csv) ===")
+    print("Training model to detect consistency...")
+    for epoch in range(epochs):
+            loss = run_training_step(system, train_df)
+            acc = evaluate_accuracy(system, test_df)
+            print(f"Epoch {epoch+1}/{epochs}: Loss={loss:.4f} Acc={acc:.2%}")
+            
+            torch.save(system.classifier.state_dict(), os.path.join(system.model_dir, "narrative_consistency.pt"))
+            torch.save(system.bdh.state_dict(), os.path.join(system.model_dir, "bdh_base.pt"))
+            
+    print("\n=== Training Complete ===")
+    final_acc = evaluate_accuracy(system, test_df)
+    print(f"Final Model Accuracy on Dataset: {final_acc:.2%}")
+    if not os.path.exists(os.path.join(system.data_dir, "test.csv")):
+            print("(Note: Evaluated on train.csv since test.csv was not found)")
+
+def run_training_step(system, train_df, batch_size=4):
+    system.classifier.train()
+    system.bdh.train()
+    total_loss = 0
+    
+    optimizer = torch.optim.Adam(
+        list(system.classifier.parameters()) + list(system.bdh.parameters()),
+        lr=1e-4
+    )
+    criterion = nn.CrossEntropyLoss()
+    
+    # Progress bar for training batches
+    num_batches = (len(train_df) + batch_size - 1) // batch_size
+    pbar = tqdm(total=num_batches, desc="Training Batches", unit="batch", leave=False)
+    
+    for start_idx in range(0, len(train_df), batch_size):
+        batch = train_df.iloc[start_idx : start_idx + batch_size]
+        if len(batch) < 2: 
+            pbar.update(1)
+            continue
+        
+        contents = batch['content'].tolist()
+        labels = torch.tensor(
+            [1 if l.strip().lower() == 'consistent' else 0 for l in batch['label']],
+            device=system.device
+        )
+        
+        states = []
+        for _, row in batch.iterrows():
+            key = (row['book_name'].strip(), row['char'].strip())
+            if key in system.backstory_states:
+                states.append(system.backstory_states[key].to(system.device))
+            else:
+                system.bdh.reset_state()
+                states.append(system.bdh.get_state())
+
+        v_iso = system.encode_text(contents, distinct_states=None)
+        v_ctx = system.encode_text(contents, distinct_states=states)
+        
+        optimizer.zero_grad()
+        logits = system.classifier(v_iso, v_ctx)
+        
+        ce_loss = criterion(logits, labels)
+        loss = ce_loss 
+        
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+        pbar.update(1)
+        pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+        
+    pbar.close()
+    return total_loss / max(1, len(train_df) // batch_size)
+
+def evaluate_accuracy(system, test_df):
+    correct = 0
+    total = 0
+    system.bdh.eval()
+    system.classifier.eval()
+    
+    if hasattr(system, 'hybrid_classifier') and system.hybrid_classifier is not None:
+            system.hybrid_classifier.eval()
+    
+    with torch.no_grad():
+        for _, row in test_df.iterrows():
+            book = row['book_name']
+            char = row['char']
+            content = row['content']
+            label = row['label'].strip().lower()
+            
+            score = system.predict_single(book, char, content)
+            
+            pred = "consistent" if score > 0.5 else "contradict"
+            if pred == label:
+                correct += 1
+            total += 1
+            
+    return correct / total if total > 0 else 0
