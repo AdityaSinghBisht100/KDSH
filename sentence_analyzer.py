@@ -33,71 +33,7 @@ class DevelopmentInfo:
     confidence: float
     description: str
 
-
-class CoherenceClassifier(nn.Module):
-    """
-    Trained classifier for consistency between Content and Context.
-    Input: Content Embedding, Context Embedding
-    Output: Logits [Contradict, Consistent]
-    """
-    def __init__(self, input_dim, device):
-        super().__init__()
-        self.device = device
-        self.use_gnn = False  # GNN removed
-        
-        if self.use_gnn:
-            self.gnn = TemporalCausalGNN(d_model=input_dim, n_heads=4, dropout=0.1)
-            
-        self.net = nn.Sequential(
-            nn.Linear(input_dim * 4, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, 2) # 0: Contradict, 1: Consistent
-        )
-        
-    def forward(self, content_emb, context_emb):
-        # GNN Enhancement
-        if self.use_gnn:
-            batch_size = content_emb.size(0)
-            data_list = []
-            edge_type = 4 # thematic_relates
-            
-            for i in range(batch_size):
-                # 2 nodes: Content (0), Context (1)
-                x = torch.stack([content_emb[i], context_emb[i]]) # [2, D]
-                
-                # Directed Edge: Context (1) -> Content (0)
-                # Prevents over-smoothing
-                edge_index = torch.tensor([[1], [0]], dtype=torch.long, device=self.device)
-                edge_attr = torch.tensor([edge_type], dtype=torch.long, device=self.device)
-                pos = torch.tensor([0, 0], dtype=torch.long, device=self.device)
-                
-                data_list.append(Data(x=x, edge_index=edge_index, edge_attr=edge_attr, pos=pos))
-            
-            # Simple batching from list
-            batch = Batch.from_data_list(data_list)
-            
-            # Run GNN
-            out_nodes, _ = self.gnn(batch) # [2*B, D]
-            out_nodes = out_nodes.view(batch_size, 2, -1)
-            
-            # Update embeddings with graph context
-            content_emb = out_nodes[:, 0, :]
-            context_emb = out_nodes[:, 1, :]
-            
-        # Feature interaction
-        features = torch.cat([
-            content_emb, 
-            context_emb, 
-            torch.abs(content_emb - context_emb),
-            content_emb * context_emb
-        ], dim=1)
-        
-        return self.net(features)
+# Redundant classes removed. Using CoherenceClassifier from .models
 
 class CoherenceScorer(nn.Module):
     """
@@ -109,6 +45,8 @@ class CoherenceScorer(nn.Module):
         super().__init__()
         self.d_model = d_model
         
+        # Import local implementation to avoid duplication or missing imports
+        from .models import CoherenceClassifier
         # Trained consistency classifier
         self.consistency_net = CoherenceClassifier(d_model, device)
         
@@ -251,12 +189,14 @@ class DevelopmentTracker:
 class SentenceAnalyzer(nn.Module):
     """Processes each sentence of current story and computes relevance to backstory."""
     
-    def __init__(self, bdh_model, d_model: int, device: torch.device):
+    def __init__(self, bdh_model, d_model: int, device: torch.device, data_dir: str = "./files", tokenizer = None):
         super().__init__()
         
         self.bdh_model = bdh_model
         self.d_model = d_model
         self.device = device
+        self.data_dir = data_dir
+        self.tokenizer = tokenizer
         
         # Coherence scorer - move to device
         self.coherence_scorer = CoherenceScorer(d_model, device).to(device)
@@ -274,12 +214,6 @@ class SentenceAnalyzer(nn.Module):
             dropout=0.1,
             batch_first=True
         ).to(device)
-        
-        # Book paths for character extraction
-        self.book_paths = {
-            "The Count of Monte Cristo": "/root/files/The Count of Monte Cristo.txt",
-            "In Search of the Castaways": "/root/files/In search of the castaways.txt"
-        }
 
     def extract_character_substory(self, book_name: str, char_name: str) -> List[str]:
         """
@@ -289,15 +223,13 @@ class SentenceAnalyzer(nn.Module):
         import re
         
         # Normalize book name
-        book_path = self.book_paths.get(book_name)
-        if not book_path:
-            print(f"Warning: Unknown book '{book_name}'")
-            return []
-            
-        try:
-            with open(book_path, 'r', encoding='utf-8') as f:
-                text = f.read()
-        except FileNotFoundError:
+        book_path = os.path.join(self.data_dir, f"{book_name}.txt")
+        if not os.path.exists(book_path):
+             # Try direct match
+             if book_name == "In Search of the Castaways":
+                 book_path = os.path.join(self.data_dir, "In search of the castaways.txt")
+        
+        if not os.path.exists(book_path):
             print(f"Warning: Book file not found: {book_path}")
             return []
             
@@ -314,15 +246,18 @@ class SentenceAnalyzer(nn.Module):
         return relevant
     
     def encode_sentence(self, sentence: Sentence) -> torch.Tensor:
-        """Encode a single sentence using BDH."""
-        tokens = torch.tensor(sentence.tokens[:512], dtype=torch.long, device=self.device).unsqueeze(0)
+        """Encode a single sentence using semantic BDH."""
+        if self.tokenizer is None:
+             from transformers import AutoTokenizer
+             self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+             
+        encoded = self.tokenizer(sentence.text, return_tensors="pt", truncation=True, max_length=256).to(self.device)
+        tokens = encoded['input_ids']
         
         with torch.no_grad():
-            emb = self.bdh_model.embed(tokens)  # [1, seq_len, d_model]
+            emb = self.bdh_model.compute_embeddings(tokens)  # [1, d_model]
         
-        # Mean pool
-        sent_emb = torch.mean(emb, dim=1).squeeze(0)  # [d_model]
-        return sent_emb
+        return emb.squeeze(0)
     
     def retrieve_relevant_backstory(
         self,

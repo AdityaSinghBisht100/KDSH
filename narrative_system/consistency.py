@@ -61,16 +61,23 @@ class CounterfactualChecker:
         self.bdh = bdh_model
         self.device = device
         
-        # Negation patterns (rule-based, no LLM)
+        # Initialize Semantic Tokenizer for consistency checking
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+        
+        # Negation patterns (Improved)
         self.negation_patterns = [
-            (r"^(.+) is (.+)$", r"\1 is NOT \2"),
-            (r"^(.+) was (.+)$", r"\1 was NOT \2"),
-            (r"^(.+) has (.+)$", r"\1 has NOT \2"),
-            (r"^(.+) had (.+)$", r"\1 had NOT \2"),
-            (r"^(.+) did (.+)$", r"\1 did NOT \2"),
-            (r"^(.+) does (.+)$", r"\1 does NOT \2"),
-            (r"^(.+) can (.+)$", r"\1 can NOT \2"),
-            (r"^(.+) will (.+)$", r"\1 will NOT \2"),
+            (r"^(.+) is (.+)$", r"\1 is not \2"),
+            (r"^(.+) was (.+)$", r"\1 was not \2"),
+            (r"^(.+) has (.+)$", r"\1 has not \2"),
+            (r"^(.+) had (.+)$", r"\1 had not \2"),
+            (r"^(.+) did (.+)$", r"\1 did not \2"),
+            (r"^(.+) does (.+)$", r"\1 does not \2"),
+            (r"^(.+) can (.+)$", r"\1 can not \2"),
+            (r"^(.+) will (.+)$", r"\1 will not \2"),
+            (r"^(.+) went to (.+)$", r"\1 did not go to \2"),
+            (r"^(.+) saw (.+)$", r"\1 did not see \2"),
+            (r"^(.+) likes (.+)$", r"\1 does not like \2"),
         ]
     
     def negate(self, statement: str) -> str:
@@ -89,9 +96,9 @@ class CounterfactualChecker:
         return f"It is NOT true that {statement}"
     
     def encode_text(self, text: str) -> torch.Tensor:
-        """Convert text to byte tokens."""
-        tokens = torch.tensor([[ord(c) % 256 for c in text]], dtype=torch.long, device=self.device)
-        return tokens
+        """Convert text to semantic tokens."""
+        encoded = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=256).to(self.device)
+        return encoded['input_ids']
     
     def compute_surprise(self, text: str, world_state: torch.Tensor, 
                           fact_time: float = 0.0, query_time: float = 1.0,
@@ -123,28 +130,30 @@ class CounterfactualChecker:
         # Get state after
         state_after = self.bdh.get_state()
         
-        # Bugfix #2: Layer-weighted Δ (later layers encode higher-level state)
-        if state_after.dim() >= 2 and state_after.shape[0] > 1:
+        # FIX for >85% Accuracy: Multi-Layer Semantic Surprise
+        # Later layers (abstraction) and Mid layers (relation) are weighted more than early layers (lexical)
+        if state_after.dim() >= 4: # [Layers, Heads, D, D]
             n_layers = state_after.shape[0]
-            layer_weights = torch.linspace(0.5, 1.5, n_layers, device=self.device)
+            # Quadratic weighting: penalize inconsistencies in deep abstractions more
+            layer_weights = torch.pow(torch.linspace(0.1, 2.0, n_layers, device=self.device), 2)
             
-            # Compute weighted sum of per-layer deltas
-            delta = 0.0
+            surprise_vals = []
             for i in range(n_layers):
-                layer_delta = torch.norm(state_after[i] - state_before[i], p=2).item()
-                delta += layer_weights[i].item() * layer_delta
+                # Calculate Frobenius norm difference per layer
+                l_diff = torch.norm(state_after[i] - state_before[i], p='fro')
+                surprise_vals.append(l_diff * layer_weights[i])
+            
+            delta = torch.stack(surprise_vals).sum().item()
         else:
-            # Fallback for single-layer or flat state
             delta = torch.norm(state_after - state_before, p=2).item()
         
-        # Temporal decay affects surprise
+        # Temporal decay: older facts are less "surprising" if violated 
+        # (narratives evolve, characters change)
         temporal_decay = math.exp(-temporal_beta * (query_time - fact_time))
         delta = delta * temporal_decay
         
-        # Stabilize via log1p (prevents explosion)
+        # Nonlinear scaling to handle outliers
         surprise = math.log1p(delta)
-        
-        # Clamp for additional safety
         surprise = min(surprise, math.log1p(SURPRISE_MAX))
         
         return surprise

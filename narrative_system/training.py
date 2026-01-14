@@ -29,6 +29,12 @@ def train(system, epochs=5):
     ingest_novel_knowledge(system, combined, test_mode=False)
     
     print("\n=== Phase 2: Supervised Training (train.csv) ===")
+    
+    # Pre-training Validation (Immediate Feedback)
+    print("Running initial validation on test set...")
+    initial_acc = evaluate_accuracy(system, test_df)
+    print(f"Initial Accuracy (Ingestion Only): {initial_acc:.2%}")
+    
     print("Training model to detect consistency (Hybrid Mode)...")
     for epoch in range(epochs):
             loss = run_training_step(system, train_df)

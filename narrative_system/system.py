@@ -29,8 +29,8 @@ except ImportError:
     raise
 
 # Constants
-MAX_SEQ_LEN = 128
-EMBEDDING_DIM = 256
+MAX_SEQ_LEN = 256  # Increased for better narrative context
+EMBEDDING_DIM = 384 # Matched to upgraded BDHConfig
 
 class NarrativeConsistencySystem:
     def __init__(self, data_dir="./files", model_dir="./models"):
@@ -115,7 +115,12 @@ class NarrativeConsistencySystem:
 
         # Import and initialize sentence analyzer
         from sentence_analyzer import SentenceAnalyzer
-        self.sentence_analyzer = SentenceAnalyzer(self.bdh, EMBEDDING_DIM, self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+        self.sentence_analyzer = SentenceAnalyzer(self.bdh, EMBEDDING_DIM, self.device, data_dir=self.data_dir, tokenizer=self.tokenizer)
+
+        # Initialize Semantic Tokenizer
+        from transformers import AutoTokenizer
+        print("Using Semantic Tokenizer (distilbert-base-uncased)...")
 
         self.backstory_store = {}
         self.backstory_states = {} 
@@ -128,18 +133,16 @@ class NarrativeConsistencySystem:
         if not text_list:
             return torch.zeros((1, EMBEDDING_DIM), device=self.device)
             
-        batch_tensors = []
-        for text in text_list:
-            # Simple truncation/encoding
-            tokens = torch.tensor([ord(c) % 256 for c in text[:MAX_SEQ_LEN]], dtype=torch.long, device=self.device)
-            if len(tokens) == 0:
-                 tokens = torch.zeros(1, dtype=torch.long, device=self.device)
-            batch_tensors.append(tokens)
-            
-        max_len = max([len(t) for t in batch_tensors])
-        padded = torch.zeros(len(batch_tensors), max_len, dtype=torch.long, device=self.device)
-        for i, t in enumerate(batch_tensors):
-            padded[i, :len(t)] = t
+        # Use Semantic Tokenizer instead of byte-level ord()
+        encoded = self.tokenizer(
+            text_list, 
+            padding=True, 
+            truncation=True, 
+            max_length=MAX_SEQ_LEN, 
+            return_tensors="pt"
+        ).to(self.device)
+        
+        padded = encoded['input_ids']
             
         # Manage State for Contextual Encoding
         if distinct_states is not None:
@@ -151,8 +154,7 @@ class NarrativeConsistencySystem:
         if distinct_states is None:
              # Isolated: Standard forward, no state usage (or reset first)
              self.bdh.reset_state() # Ensure clean slate
-             with torch.no_grad():
-                sent_emb = self.bdh.compute_embeddings(padded)
+             sent_emb = self.bdh.compute_embeddings(padded)
         else:
              # Contextual loop
              sent_embs = []
@@ -163,13 +165,12 @@ class NarrativeConsistencySystem:
                   else:
                       s = distinct_states # Broadcast
                   
-                  self.bdh.set_state(s.to(self.device))
+                  self.bdh.set_state(s.to(self.device).detach().clone())
                   row = padded[i:i+1] # [1, T]
                   
-                  with torch.no_grad():
-                      e_seq = self.bdh(row, use_state=True, return_embeddings=True)
-                      e = e_seq.mean(dim=1) # [1, D]
-                      sent_embs.append(e)
+                  e_seq = self.bdh(row, use_state=True, return_embeddings=True)
+                  e = e_seq.mean(dim=1) # [1, D]
+                  sent_embs.append(e)
              sent_emb = torch.cat(sent_embs, dim=0)
 
         return sent_emb
@@ -187,7 +188,9 @@ class NarrativeConsistencySystem:
         with torch.no_grad():
             for i in range(0, len(text_stream), chunk_size):
                 chunk = text_stream[i : i+chunk_size]
-                tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=self.device)
+                encoded = self.tokenizer(chunk, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LEN).to(self.device)
+                tokens = encoded['input_ids']
+                
                 if tokens.size(1) == 0: continue
                 
                 # Forward Pass with State Update

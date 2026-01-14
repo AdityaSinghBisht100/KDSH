@@ -10,16 +10,16 @@ from torch import nn
 
 @dataclasses.dataclass
 class BDHConfig:
-    n_layer: int = 6
-    n_embd: int = 256
+    n_layer: int = 12            # Increased layers for deeper reasoning
+    n_embd: int = 384            # Larger embedding dimension for semantic richness
     dropout: float = 0.1
-    n_head: int = 4
-    mlp_internal_dim_multiplier: int = 128
-    vocab_size: int = 256
+    n_head: int = 6              # More heads for complex relationship tracking
+    mlp_internal_dim_multiplier: int = 4
+    vocab_size: int = 30522      # Standard BERT-compatible vocabulary size
     # Temporal conditioning parameters
-    temporal_dim: int = 64       # Temporal embedding dimension
+    temporal_dim: int = 128      # Higher dim for temporal context
     use_temporal: bool = True    # Enable temporal-conditioned updates
-    max_chapters: int = 100      # Maximum chapter index for embedding
+    max_chapters: int = 200      # Higher limit for longer narratives
 
 
 def get_freqs(n, theta, dtype):
