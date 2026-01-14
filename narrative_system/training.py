@@ -58,66 +58,58 @@ def run_training_step(system, train_df, loss_fn, batch_size=4):
     checker = CounterfactualChecker(system.bdh, system.tokenizer, system.device)
     
     total_loss = 0
-    num_batches = (len(train_df) + batch_size - 1) // batch_size
-    pbar = tqdm(total=num_batches, desc="Energy Training", unit="batch", leave=False)
+    num_samples = len(train_df)
+    pbar = tqdm(total=num_samples, desc="Energy Training", unit="sample", leave=False)
     
     # Shuffle training data
     train_df = train_df.sample(frac=1).reset_index(drop=True)
     
-    for start_idx in range(0, len(train_df), batch_size):
-        batch = train_df.iloc[start_idx : start_idx + batch_size]
+    # Process ONE sample at a time to avoid OOM (gradient accumulation uses too much memory)
+    for idx, row in train_df.iterrows():
+        book = row['book_name'].strip()
+        char = row['char'].strip()
+        content = row['content']
+        label = row['label'].strip().lower()
+        is_contradict = (label == 'contradict')
+        
+        key = (book, char)
+        if key in system.backstory_states:
+            world_state = system.backstory_states[key]
+        else:
+            system.bdh.reset_state()
+            world_state = system.bdh.get_state()
         
         optimizer.zero_grad()
-        batch_loss = torch.tensor(0.0, device=system.device)
-        valid_samples = 0
         
-        for _, row in batch.iterrows():
-            book = row['book_name'].strip()
-            char = row['char'].strip()
-            content = row['content']
-            label = row['label'].strip().lower()
-            is_contradict = (label == 'contradict')
-            
-            key = (book, char)
-            if key in system.backstory_states:
-                # Use the learned world state
-                world_state = system.backstory_states[key]
-            else:
-                # Fallback to empty state
-                system.bdh.reset_state()
-                world_state = system.bdh.get_state()
-            
-            # 1. Compute Surprise(Statement)
-            # training=True enables gradients
-            pos_surprise = checker.compute_surprise(content, world_state, training=True)
-            
-            # 2. Compute Surprise(Negation)
-            negated = checker.negate(content)
-            neg_surprise = checker.compute_surprise(negated, world_state, training=True)
-            
-            # 3. Compute Energy Loss
-            # Pass float values wrapped in tensors managed by compute_surprise
-            # Check consistency.py: it returns tensor if training=True
-            loss = loss_fn(pos_surprise, neg_surprise, is_contradict)
-            
-            batch_loss += loss
-            valid_samples += 1
-            
-        if valid_samples > 0:
-            batch_loss = batch_loss / valid_samples
-            batch_loss.backward()
-            
-            # Gradient clipping to prevent exploding gradients in recurrent state
-            torch.nn.utils.clip_grad_norm_(system.bdh.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            total_loss += batch_loss.item()
+        # 1. Compute Surprise(Statement) with gradient
+        pos_surprise = checker.compute_surprise(content, world_state, training=True)
+        
+        # 2. Compute Surprise(Negation) with gradient
+        negated = checker.negate(content)
+        neg_surprise = checker.compute_surprise(negated, world_state, training=True)
+        
+        # 3. Compute Energy Loss
+        loss = loss_fn(pos_surprise, neg_surprise, is_contradict)
+        
+        # Backward and step per sample to free memory immediately
+        loss.backward()
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(system.bdh.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+        total_loss += loss.item()
+        
+        # Free memory aggressively
+        del pos_surprise, neg_surprise, loss
+        if idx % 10 == 0:
+            torch.cuda.empty_cache()
             
         pbar.update(1)
-        pbar.set_postfix({'loss': f"{batch_loss.item():.4f}"})
+        pbar.set_postfix({'loss': f"{total_loss / (idx + 1):.4f}"})
         
     pbar.close()
-    return total_loss / num_batches
+    return total_loss / num_samples
 
 def evaluate_accuracy(system, test_df):
     correct = 0

@@ -17,7 +17,7 @@ def ingest_novel_knowledge(system, train_df, test_mode=True):
         print(f"  ✨ Found cached World State at {cache_path}")
         print(f"  ✨ Loading knowledge from disk (skipping raw text ingestion)...")
         try:
-            cached_data = torch.load(cache_path)
+            cached_data = torch.load(cache_path, weights_only=False)
             system.world_states = cached_data['world_states']
             system.backstory_states = cached_data['backstory_states']
             print(f"  ✅ Loaded state for {len(system.world_states)} books. Jumping to Phase 2.")

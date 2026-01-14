@@ -19,19 +19,27 @@ class ContrastiveEnergyLoss(nn.Module):
         super().__init__()
         self.margin = margin
     
-    def forward(self, surprise_pos: float, surprise_neg: float, 
+    def forward(self, surprise_pos, surprise_neg, 
                 is_contradict: bool) -> torch.Tensor:
         """
         Args:
-            surprise_pos: Surprise of original statement
-            surprise_neg: Surprise of negated statement
+            surprise_pos: Surprise of original statement (tensor or float)
+            surprise_neg: Surprise of negated statement (tensor or float)
             is_contradict: True if label is "contradict"
         
         Returns:
             Loss tensor
         """
-        E_pos = torch.tensor(surprise_pos, dtype=torch.float32)
-        E_neg = torch.tensor(surprise_neg, dtype=torch.float32)
+        # Preserve gradient chain if inputs are already tensors
+        if isinstance(surprise_pos, torch.Tensor):
+            E_pos = surprise_pos
+        else:
+            E_pos = torch.tensor(surprise_pos, dtype=torch.float32, requires_grad=True)
+            
+        if isinstance(surprise_neg, torch.Tensor):
+            E_neg = surprise_neg
+        else:
+            E_neg = torch.tensor(surprise_neg, dtype=torch.float32, requires_grad=True)
         
         if is_contradict:
             # Contradiction: E_pos should be HIGH (resisted by world)
@@ -129,13 +137,15 @@ class CounterfactualChecker:
         tokens = self.encode_text(text)
         
         if training:
-            self.bdh(tokens, use_state=True)
+            # Functional Forward Pass for Energy Training
+            # use_state=True: Run recurrence (so state evolves)
+            # return_new_state=True: Return evolved state, do NOT update persistent self.state
+            _, state_after = self.bdh(tokens, use_state=True, return_new_state=True)
         else:
             with torch.no_grad():
                 self.bdh(tokens, use_state=True)
-        
-        # Get state after
-        state_after = self.bdh.get_state()
+                # For inference, state is updated in-place, so we fetch it
+                state_after = self.bdh.get_state()
         
         # Bugfix #2: Layer-weighted Δ (later layers encode higher-level state)
         if state_after.dim() >= 2 and state_after.shape[0] > 1:

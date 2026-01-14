@@ -82,7 +82,7 @@ class NarrativeConsistencySystem:
         
         # Initialize BPE Tokenizer
         try:
-            self.tokenizer = tiktoken.get_encoding("gpt2")
+            self.tokenizer = tiktoken.get_encoding("cl100k_base")
             vocab_size = self.tokenizer.n_vocab
             print(f"✅ Tokenizer initialized (Vocab: {vocab_size})")
         except Exception as e:
@@ -102,7 +102,7 @@ class NarrativeConsistencySystem:
                  # Strict=False to allow shape mismatch if we are reloading old weights (though they won't work well)
                  # Actually, shape mismatch on Embedding will error out even with strict=False usually unless filtered.
                  # Ideally we should ignore mismatch keys.
-                 state_dict = torch.load(bdh_path, map_location=self.device)
+                 state_dict = torch.load(bdh_path, map_location=self.device, weights_only=False)
                  if state_dict['embed.weight'].shape[0] != vocab_size:
                      print("⚠️  Vocab size mismatch (Old model). Starting fresh.")
                  else:

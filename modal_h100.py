@@ -8,7 +8,7 @@ app = modal.App("bdh-narrative-consistency")
 model_volume = modal.Volume.from_name("bdh-model-vol", create_if_missing=True)
 
 # Define the environment (Container Image)
-# Copy all local files into the image at build time
+# v14 - Increase capacity to 64
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -18,7 +18,7 @@ image = (
         "numpy",
         "tiktoken"
     )
-    .copy_local_dir(".", "/root/bdh", ignore=[".git", "__pycache__", "*.pt", "models/"])
+    .add_local_dir(".", remote_path="/root/bdh")
 )
 
 @app.function(
@@ -36,6 +36,8 @@ def run_pipeline_on_h100():
     
     print(f"🚀 Running on Modal! GPU: {torch.cuda.get_device_name(0)}")
     
+    # Force delete stale cache if dimensions changed
+        
     from narrative_system import NarrativeConsistencySystem
     from narrative_system.ingestion import ingest_novel_knowledge
     from narrative_system.inference import generate_predictions
@@ -43,6 +45,18 @@ def run_pipeline_on_h100():
     DATA_DIR = "./files"
     MODEL_DIR = "/root/models"
     CACHE_FILE = os.path.join(MODEL_DIR, "world_state_h100.pt")
+    CACHE_FILE_PHASE1 = os.path.join(MODEL_DIR, "world_state_cache.pt")
+    
+    # Fix dimension mismatch (Multiplier 64)
+    if os.path.exists(CACHE_FILE):
+        print(f"⚠️ Deleting Stale Cache {CACHE_FILE} to fix dimension mismatch")
+        os.remove(CACHE_FILE)
+    if os.path.exists(CACHE_FILE_PHASE1):
+        print(f"⚠️ Deleting Stale Cache {CACHE_FILE_PHASE1} to fix dimension mismatch")
+        os.remove(CACHE_FILE_PHASE1)
+    
+
+
     OUTPUT_FILE = "/root/bdh/submission_h100.csv"
     
     system = NarrativeConsistencySystem(data_dir=DATA_DIR, model_dir=MODEL_DIR)
@@ -50,7 +64,7 @@ def run_pipeline_on_h100():
     
     if os.path.exists(CACHE_FILE):
         print(f"📦 Found cached state: {CACHE_FILE}")
-        checkpoint = torch.load(CACHE_FILE)
+        checkpoint = torch.load(CACHE_FILE, weights_only=False)
         system.world_states = checkpoint['world_states']
         system.backstory_states = checkpoint['backstory_states']
     else:
@@ -78,6 +92,10 @@ def run_pipeline_on_h100():
             print("❌ No CSV files!")
             return None
 
+    print("🏋️ Running Training on H100 (5 Epochs)...")
+    system.train(epochs=5)
+    model_volume.commit() # Save the trained weights to volume
+    
     print("🧠 Running Inference...")
     generate_predictions(system, input_file="test.csv", output_file=OUTPUT_FILE)
     

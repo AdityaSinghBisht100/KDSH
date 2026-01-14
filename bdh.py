@@ -14,7 +14,7 @@ class BDHConfig:
     n_embd: int = 256
     dropout: float = 0.1
     n_head: int = 4
-    mlp_internal_dim_multiplier: int = 128
+    mlp_internal_dim_multiplier: int = 64 # Increased to 64 (approx 50GB VRAM usage) to fix model collapse
     vocab_size: int = 50257
     # Temporal conditioning parameters
     temporal_dim: int = 64       # Temporal embedding dimension
@@ -221,8 +221,12 @@ class TemporalLinearAttention(LinearAttention):
         decay = torch.exp(-self.temporal_beta * distance * 0.0001)
         return decay.clamp(0.01, 1.0)  # Never fully forget
     
+    def forward(self, Q, K, V, use_state=False, layer_idx=0, return_new_state=False, initial_state=None):
+        return self.forward_temporal(Q, K, V, 0, 0, use_state, layer_idx, return_new_state, initial_state)
+
     def forward_temporal(self, Q, K, V, chapter_idx: int = 0, timestep: int = 0, 
-                         use_state: bool = False, layer_idx: int = 0):
+                         use_state: bool = False, layer_idx: int = 0,
+                         return_new_state: bool = False, initial_state: torch.Tensor = None):
         """
         Temporal-conditioned forward pass with gated updates.
         """
@@ -234,8 +238,13 @@ class TemporalLinearAttention(LinearAttention):
         if use_state:
             # Recurrent mode with temporal gating
             out = []
-            curr_state = self.state[layer_idx]  # [nh, head_dim, D]
-            curr_time = self.stored_timesteps[layer_idx]  # [nh, head_dim, 1]
+            
+            if initial_state is not None:
+                curr_state = initial_state
+            else:
+                curr_state = self.state[layer_idx].clone()  # [nh, head_dim, D]
+                
+            curr_time = self.stored_timesteps[layer_idx].clone()  # [nh, head_dim, 1]
             
             for t in range(T):
                 actual_timestep = timestep + t
@@ -270,8 +279,13 @@ class TemporalLinearAttention(LinearAttention):
                 # GATED UPDATE: S = (1-E) * (α * S) + W * KV
                 if B == 1:
                     curr_state = (1 - erase) * (α_t * curr_state) + write * kv
-                    self.state[layer_idx] = curr_state
-                    self.stored_timesteps[layer_idx] = torch.full_like(curr_time, actual_timestep)
+                    
+                    if not return_new_state:
+                        # Inference mode: Persist state
+                        with torch.no_grad():
+                            self.state[layer_idx] = curr_state.detach().clone()
+                            self.stored_timesteps[layer_idx] = torch.full_like(curr_time, actual_timestep)
+                            
                     state_for_attn = curr_state.unsqueeze(0)
                 else:
                     state_for_attn = kv.unsqueeze(0)
@@ -280,7 +294,10 @@ class TemporalLinearAttention(LinearAttention):
                 o_t = torch.matmul(q_t, state_for_attn)
                 out.append(o_t.squeeze(2))
                 
-            return torch.stack(out, dim=2)
+            result = torch.stack(out, dim=2)
+            if return_new_state:
+                return result, curr_state
+            return result
         else:
             # Parallel mode - standard attention
             return self.standard_attn(Q, K, V)
@@ -333,7 +350,7 @@ class BDH(nn.Module):
         """Load a pre-computed recurrent state."""
         self.attn.state.copy_(state)
 
-    def forward(self, idx, targets=None, use_state=False, return_embeddings=False):
+    def forward(self, idx, targets=None, use_state=False, return_embeddings=False, return_new_state=False):
         C = self.config
 
         B, T = idx.size()
@@ -345,19 +362,29 @@ class BDH(nn.Module):
 
         # actually helps with training
         x = self.ln(x)  # B, 1, T, D
+        
+        new_states = []
 
         for level in range(C.n_layer):
             x_latent = x @ self.encoder
 
             x_sparse = F.relu(x_latent)  # B, nh, T, N
 
-            yKV = self.attn(
+            res = self.attn(
                 Q=x_sparse,
                 K=x_sparse,
                 V=x,
                 use_state=use_state, # Pass inference flag
-                layer_idx=level # Pass depth index for state management
+                layer_idx=level, # Pass depth index for state management
+                return_new_state=return_new_state
             )
+            
+            if return_new_state:
+                yKV, state = res
+                new_states.append(state)
+            else:
+                yKV = res
+                
             yKV = self.ln(yKV)
 
             y_latent = yKV @ self.encoder_v
@@ -379,6 +406,9 @@ class BDH(nn.Module):
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            
+        if return_new_state:
+            return logits, torch.stack(new_states)
 
         return logits, loss
     

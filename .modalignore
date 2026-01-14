@@ -1,0 +1,38 @@
+# Modal ignore file - exclude these from upload
+
+# Virtual Environment (THIS IS THE BIG ONE!)
+venv/
+.venv/
+env/
+
+# Git
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Model checkpoints (use Volume instead)
+*.pt
+*.pth
+*.ckpt
+models/
+
+# Cache files
+*.cache
+world_state_cache.pt
+
+# IDE
+.vscode/
+.idea/
+
+# Large files
+figs/
+
+# Misc
+*.log
+*.tmp
