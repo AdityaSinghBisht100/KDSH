@@ -82,20 +82,8 @@ class NarrativeConsistencySystem:
         self.bdh = BDH(self.config).to(self.device)
         self.bdh.eval()
         
-        self.classifier = CoherenceClassifier(EMBEDDING_DIM, self.device).to(self.device)
-        
-        # Load Weights if available
-        weights_path = os.path.join(self.model_dir, "narrative_consistency.pt")
-        if os.path.exists(weights_path):
-            try:
-                self.classifier.load_state_dict(torch.load(weights_path, map_location=self.device), strict=False)
-                print("Loaded classifier weights (strict=False).")
-            except Exception as e:
-                print(f"Weights load failed: {e}")
-        else:
-            print(f"⚠️  MODEL NOT FOUND: {weights_path}")
-            print(f"    Please download 'narrative_consistency.pt' and 'bdh_base.pt' from Google Drive")
-            print(f"    and place them in the '{self.model_dir}' folder.")
+        # Classifier removed - we use direct Energy Inference
+        self.classifier = None
                 
         bdh_path = os.path.join(self.model_dir, "bdh_base.pt")
         if os.path.exists(bdh_path):

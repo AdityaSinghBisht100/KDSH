@@ -61,32 +61,48 @@ class CounterfactualChecker:
         self.bdh = bdh_model
         self.device = device
         
-        # Negation patterns (rule-based, no LLM)
-        self.negation_patterns = [
-            (r"^(.+) is (.+)$", r"\1 is NOT \2"),
-            (r"^(.+) was (.+)$", r"\1 was NOT \2"),
-            (r"^(.+) has (.+)$", r"\1 has NOT \2"),
-            (r"^(.+) had (.+)$", r"\1 had NOT \2"),
-            (r"^(.+) did (.+)$", r"\1 did NOT \2"),
-            (r"^(.+) does (.+)$", r"\1 does NOT \2"),
-            (r"^(.+) can (.+)$", r"\1 can NOT \2"),
-            (r"^(.+) will (.+)$", r"\1 will NOT \2"),
+        
+        # Enhanced Negation patterns (Ordered by specificity)
+        # Group 1: Remove existing negation (Toggle)
+        self.negation_removals = [
+            (r"\b(is|was|are|were|has|have|had|did|do|does|can|could|should|would|will|must|might) not\b", r"\1"),
+            (r"\b(isn|wasn|aren|weren|hasn|haven|hadn|didn|don|doesn|couldn|shouldn|wouldn|mustn)[\u2019']t\b", r"\1"),
+            (r"\bcan[\u2019']t\b", "can"),
+            (r"\bwon[\u2019']t\b", "will"),
+            (r"\bnever\b", "always"),
+            (r"\bno\b", "some"), # aggressive but often valid
         ]
-    
+
+        # Group 2: Add negation to positive verbs
+        self.negation_additions = [
+            (r"\b(is|was|are|were|has|have|had|did|do|does|can|could|should|would|will|must|might)\b", r"\1 not"),
+            (r"\b(Is|Was|Are|Were|Has|Have|Had|Did|Do|Does|Can|Could|Should|Would|Will|Must|Might)\b", r"\1 not"), # Capitalized start
+        ]
+
+        # Group 3: Morphological handling (simple heuristics for past tense)
+        # "He walked" -> "He did not walk" is hard without lemmas.
+        # We stick to the robust fallback for complex verbs.
+
     def negate(self, statement: str) -> str:
         """
         Generate negated variant of statement.
-        Rule-based, no external LLM required.
         """
         statement = statement.strip()
         
-        # Try each pattern
-        for pattern, replacement in self.negation_patterns:
-            if re.match(pattern, statement, re.IGNORECASE):
-                return re.sub(pattern, replacement, statement, flags=re.IGNORECASE)
+        # 1. Try to REMOVE negation first (Double Negation Logic)
+        for pattern, replacement in self.negation_removals:
+            if re.search(pattern, statement, re.IGNORECASE):
+                return re.sub(pattern, replacement, statement, count=1, flags=re.IGNORECASE)
         
-        # Fallback: prepend negation phrase
-        return f"It is NOT true that {statement}"
+        # 2. Try to ADD negation to auxiliary verbs
+        for pattern, replacement in self.negation_additions:
+            # We use search to find the *first* verb match to negate main clause
+            if re.search(pattern, statement): # Case sensitive for the 'Capitalized' check logic
+                return re.sub(pattern, replacement, statement, count=1)
+        
+        # 3. Fallback: Distinctive Prefix
+        # "It is false that" acts as a strong logical operator
+        return f"It is false that {statement}"
     
     def encode_text(self, text: str) -> torch.Tensor:
         """Convert text to byte tokens."""
@@ -95,17 +111,11 @@ class CounterfactualChecker:
     
     def compute_surprise(self, text: str, world_state: torch.Tensor, 
                           fact_time: float = 0.0, query_time: float = 1.0,
-                          temporal_beta: float = 0.01) -> float:
+                          temporal_beta: float = 0.01, training: bool = False) -> float:
         """
         Measure how much the statement "surprises" the world state.
         
         High surprise = statement conflicts with stored facts.
-        
-        Bugfixes Applied:
-        - Fix #1: detach().clone() for safe state copying
-        - Fix #2: Layer-weighted Δ (later layers weighted more)
-        - Fix #5: Temporal decay affects decision
-        - Fix #6: log1p stabilization
         """
         # Safe state cloning - no gradient leakage
         state_before = world_state.detach().clone().to(self.device)
@@ -117,8 +127,11 @@ class CounterfactualChecker:
         # Encode statement
         tokens = self.encode_text(text)
         
-        with torch.no_grad():
+        if training:
             self.bdh(tokens, use_state=True)
+        else:
+            with torch.no_grad():
+                self.bdh(tokens, use_state=True)
         
         # Get state after
         state_after = self.bdh.get_state()
@@ -129,23 +142,30 @@ class CounterfactualChecker:
             layer_weights = torch.linspace(0.5, 1.5, n_layers, device=self.device)
             
             # Compute weighted sum of per-layer deltas
-            delta = 0.0
+            delta = torch.tensor(0.0, device=self.device)
             for i in range(n_layers):
-                layer_delta = torch.norm(state_after[i] - state_before[i], p=2).item()
-                delta += layer_weights[i].item() * layer_delta
+                layer_delta = torch.norm(state_after[i] - state_before[i], p=2)
+                delta += layer_weights[i] * layer_delta
         else:
             # Fallback for single-layer or flat state
-            delta = torch.norm(state_after - state_before, p=2).item()
+            delta = torch.norm(state_after - state_before, p=2)
+            
+        if not training:
+            delta = delta.item()
         
         # Temporal decay affects surprise
         temporal_decay = math.exp(-temporal_beta * (query_time - fact_time))
         delta = delta * temporal_decay
         
         # Stabilize via log1p (prevents explosion)
-        surprise = math.log1p(delta)
+        if training:
+             surprise = torch.log1p(delta)
+        else:
+             surprise = math.log1p(delta)
         
         # Clamp for additional safety
-        surprise = min(surprise, math.log1p(SURPRISE_MAX))
+        if not training:
+             surprise = min(surprise, math.log1p(SURPRISE_MAX))
         
         return surprise
     

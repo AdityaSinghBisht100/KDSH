@@ -5,6 +5,7 @@ import torch.nn as nn
 import pandas as pd
 from tqdm import tqdm
 from .ingestion import ingest_novel_knowledge
+from .consistency import ContrastiveEnergyLoss, CounterfactualChecker
 
 def train(system, epochs=5):
     print(f"Starting Training on {system.device}...")
@@ -24,89 +25,105 @@ def train(system, epochs=5):
             test_df = train_df.copy() # Mock
             
     combined = pd.concat([train_df, test_df])
-    # Call the ingestion logic (which is now in system wrapper but delegates to ingestion.py)
-    # Or call directly:
     ingest_novel_knowledge(system, combined, test_mode=False)
     
     print("\n=== Phase 2: Supervised Training (train.csv) ===")
-    print("Training model to detect consistency...")
+    print("Training BDH to minimize energy for consistent statements...")
+    
+    # Initialize implementation of Energy Loss
+    # Margin 0.3 means we want Gap > 0.3
+    loss_fn = ContrastiveEnergyLoss(margin=0.5).to(system.device)
+    
     for epoch in range(epochs):
-            loss = run_training_step(system, train_df)
+            loss = run_training_step(system, train_df, loss_fn)
             acc = evaluate_accuracy(system, test_df)
             print(f"Epoch {epoch+1}/{epochs}: Loss={loss:.4f} Acc={acc:.2%}")
             
-            torch.save(system.classifier.state_dict(), os.path.join(system.model_dir, "narrative_consistency.pt"))
+            # Save only BDH, as we have no classifier head
             torch.save(system.bdh.state_dict(), os.path.join(system.model_dir, "bdh_base.pt"))
             
     print("\n=== Training Complete ===")
     final_acc = evaluate_accuracy(system, test_df)
     print(f"Final Model Accuracy on Dataset: {final_acc:.2%}")
-    if not os.path.exists(os.path.join(system.data_dir, "test.csv")):
-            print("(Note: Evaluated on train.csv since test.csv was not found)")
 
-def run_training_step(system, train_df, batch_size=4):
-    system.classifier.train()
+def run_training_step(system, train_df, loss_fn, batch_size=4):
     system.bdh.train()
-    total_loss = 0
     
     optimizer = torch.optim.Adam(
-        list(system.classifier.parameters()) + list(system.bdh.parameters()),
-        lr=1e-4
+        system.bdh.parameters(),
+        lr=5e-5 # Lower learning rate for stability
     )
-    criterion = nn.CrossEntropyLoss()
     
-    # Progress bar for training batches
+    checker = CounterfactualChecker(system.bdh, system.device)
+    
+    total_loss = 0
     num_batches = (len(train_df) + batch_size - 1) // batch_size
-    pbar = tqdm(total=num_batches, desc="Training Batches", unit="batch", leave=False)
+    pbar = tqdm(total=num_batches, desc="Energy Training", unit="batch", leave=False)
+    
+    # Shuffle training data
+    train_df = train_df.sample(frac=1).reset_index(drop=True)
     
     for start_idx in range(0, len(train_df), batch_size):
         batch = train_df.iloc[start_idx : start_idx + batch_size]
-        if len(batch) < 2: 
-            pbar.update(1)
-            continue
-        
-        contents = batch['content'].tolist()
-        labels = torch.tensor(
-            [1 if l.strip().lower() == 'consistent' else 0 for l in batch['label']],
-            device=system.device
-        )
-        
-        states = []
-        for _, row in batch.iterrows():
-            key = (row['book_name'].strip(), row['char'].strip())
-            if key in system.backstory_states:
-                states.append(system.backstory_states[key].to(system.device))
-            else:
-                system.bdh.reset_state()
-                states.append(system.bdh.get_state())
-
-        v_iso = system.encode_text(contents, distinct_states=None)
-        v_ctx = system.encode_text(contents, distinct_states=states)
         
         optimizer.zero_grad()
-        logits = system.classifier(v_iso, v_ctx)
+        batch_loss = torch.tensor(0.0, device=system.device)
+        valid_samples = 0
         
-        ce_loss = criterion(logits, labels)
-        loss = ce_loss 
-        
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
+        for _, row in batch.iterrows():
+            book = row['book_name'].strip()
+            char = row['char'].strip()
+            content = row['content']
+            label = row['label'].strip().lower()
+            is_contradict = (label == 'contradict')
+            
+            key = (book, char)
+            if key in system.backstory_states:
+                # Use the learned world state
+                world_state = system.backstory_states[key]
+            else:
+                # Fallback to empty state
+                system.bdh.reset_state()
+                world_state = system.bdh.get_state()
+            
+            # 1. Compute Surprise(Statement)
+            # training=True enables gradients
+            pos_surprise = checker.compute_surprise(content, world_state, training=True)
+            
+            # 2. Compute Surprise(Negation)
+            negated = checker.negate(content)
+            neg_surprise = checker.compute_surprise(negated, world_state, training=True)
+            
+            # 3. Compute Energy Loss
+            # Pass float values wrapped in tensors managed by compute_surprise
+            # Check consistency.py: it returns tensor if training=True
+            loss = loss_fn(pos_surprise, neg_surprise, is_contradict)
+            
+            batch_loss += loss
+            valid_samples += 1
+            
+        if valid_samples > 0:
+            batch_loss = batch_loss / valid_samples
+            batch_loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients in recurrent state
+            torch.nn.utils.clip_grad_norm_(system.bdh.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            total_loss += batch_loss.item()
+            
         pbar.update(1)
-        pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+        pbar.set_postfix({'loss': f"{batch_loss.item():.4f}"})
         
     pbar.close()
-    return total_loss / max(1, len(train_df) // batch_size)
+    return total_loss / num_batches
 
 def evaluate_accuracy(system, test_df):
     correct = 0
     total = 0
     system.bdh.eval()
-    system.classifier.eval()
     
-    if hasattr(system, 'hybrid_classifier') and system.hybrid_classifier is not None:
-            system.hybrid_classifier.eval()
-    
+    # Use inference logic
     with torch.no_grad():
         for _, row in test_df.iterrows():
             book = row['book_name']
@@ -114,6 +131,7 @@ def evaluate_accuracy(system, test_df):
             content = row['content']
             label = row['label'].strip().lower()
             
+            # predict_single uses CounterfactualChecker internally
             score, _ = system.predict_single(book, char, content)
             
             pred = "consistent" if score > 0.5 else "contradict"
