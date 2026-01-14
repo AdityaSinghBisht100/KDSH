@@ -29,13 +29,15 @@ def train(system, epochs=5):
     ingest_novel_knowledge(system, combined, test_mode=False)
     
     print("\n=== Phase 2: Supervised Training (train.csv) ===")
-    print("Training model to detect consistency...")
+    print("Training model to detect consistency (Hybrid Mode)...")
     for epoch in range(epochs):
             loss = run_training_step(system, train_df)
             acc = evaluate_accuracy(system, test_df)
             print(f"Epoch {epoch+1}/{epochs}: Loss={loss:.4f} Acc={acc:.2%}")
             
             torch.save(system.classifier.state_dict(), os.path.join(system.model_dir, "narrative_consistency.pt"))
+            if system.hybrid_classifier:
+                 torch.save(system.hybrid_classifier.state_dict(), os.path.join(system.model_dir, "hybrid_consistency.pt"))
             torch.save(system.bdh.state_dict(), os.path.join(system.model_dir, "bdh_base.pt"))
             
     print("\n=== Training Complete ===")
@@ -46,57 +48,81 @@ def train(system, epochs=5):
 
 def run_training_step(system, train_df, batch_size=4):
     system.classifier.train()
+    system.hybrid_classifier.train()
     system.bdh.train()
     total_loss = 0
     
     optimizer = torch.optim.Adam(
-        list(system.classifier.parameters()) + list(system.bdh.parameters()),
+        list(system.classifier.parameters()) + 
+        list(system.hybrid_classifier.parameters()) + 
+        list(system.bdh.parameters()),
         lr=1e-4
     )
     criterion = nn.CrossEntropyLoss()
     
-    # Progress bar for training batches
     num_batches = (len(train_df) + batch_size - 1) // batch_size
-    pbar = tqdm(total=num_batches, desc="Training Batches", unit="batch", leave=False)
+    pbar = tqdm(total=num_batches, desc="Training Hybrid Batches", unit="batch", leave=False)
     
     for start_idx in range(0, len(train_df), batch_size):
         batch = train_df.iloc[start_idx : start_idx + batch_size]
-        if len(batch) < 2: 
+        if len(batch) < 1: 
             pbar.update(1)
             continue
         
         contents = batch['content'].tolist()
+        negated_contents = [system.counterfactual_checker.negate(c) for c in contents]
+        
         labels = torch.tensor(
-            [1 if l.strip().lower() == 'consistent' else 0 for l in batch['label']],
+            [1 if str(l).strip().lower() == 'consistent' else 0 for l in batch['label']],
             device=system.device
         )
         
         states = []
         for _, row in batch.iterrows():
-            key = (row['book_name'].strip(), row['char'].strip())
+            key = (str(row['book_name']).strip(), str(row['char']).strip())
             if key in system.backstory_states:
                 states.append(system.backstory_states[key].to(system.device))
             else:
                 system.bdh.reset_state()
                 states.append(system.bdh.get_state())
 
+        # Forward passes
         v_iso = system.encode_text(contents, distinct_states=None)
         v_ctx = system.encode_text(contents, distinct_states=states)
+        v_neg_ctx = system.encode_text(negated_contents, distinct_states=states)
+        
+        # Surprise Energy Features (Differentiable proxies)
+        surprise_s = torch.norm(v_ctx - v_iso, p=2, dim=1)
+        # For negation surprise, we can use a similar proxy 
+        # (v_neg_ctx vs v_iso_neg, but let's approximate or use v_neg_ctx vs v_iso)
+        v_iso_neg = system.encode_text(negated_contents, distinct_states=None)
+        surprise_neg = torch.norm(v_neg_ctx - v_iso_neg, p=2, dim=1)
+        
+        surprise_ratio = surprise_s / (surprise_neg + 1e-8)
         
         optimizer.zero_grad()
-        logits = system.classifier(v_iso, v_ctx)
         
-        ce_loss = criterion(logits, labels)
-        loss = ce_loss 
+        # 1. Base Classifier Loss
+        logits_base = system.classifier(v_iso, v_ctx)
+        loss_base = criterion(logits_base, labels)
+        
+        # 2. Hybrid Classifier Loss
+        # v_ctx and v_neg_ctx are used to see which one "fits" the backstory better
+        logits_hybrid = system.hybrid_classifier(v_iso, v_ctx, v_neg_ctx, surprise_ratio)
+        loss_hybrid = criterion(logits_hybrid, labels)
+        
+        # Combined Loss
+        loss = loss_base + loss_hybrid
         
         loss.backward()
         optimizer.step()
+        
         total_loss += loss.item()
         pbar.update(1)
         pbar.set_postfix({'loss': f"{loss.item():.4f}"})
         
     pbar.close()
-    return total_loss / max(1, len(train_df) // batch_size)
+    return total_loss / max(1, num_batches)
 
 def evaluate_accuracy(system, test_df):
     correct = 0

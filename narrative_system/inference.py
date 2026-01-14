@@ -31,25 +31,39 @@ def predict_single(system, book_name, char_name, content):
 
     state = system.backstory_states[key].to(system.device)
     
+    negated_content = system.counterfactual_checker.negate(content)
+    
     v_iso = system.encode_text([content], distinct_states=None)
     v_ctx = system.encode_text([content], distinct_states=state)
+    v_neg_ctx = system.encode_text([negated_content], distinct_states=state)
+    
+    # Differentiable proxies for surprise (matches training)
+    v_iso_neg = system.encode_text([negated_content], distinct_states=None)
     
     with torch.no_grad():
+        surprise_s = torch.norm(v_ctx - v_iso, p=2, dim=1)
+        surprise_neg = torch.norm(v_neg_ctx - v_iso_neg, p=2, dim=1)
+        surprise_ratio = surprise_s / (surprise_neg + 1e-8)
+        
+        if system.hybrid_classifier is not None:
+            logits = system.hybrid_classifier(v_iso, v_ctx, v_neg_ctx, surprise_ratio)
+        else:
             logits = system.classifier(v_iso, v_ctx)
-            probs = torch.softmax(logits, dim=1)
-            score = probs[0, 1].item()
             
-            # Rationale Generation
-            if score > 0.8:
-                rationale = "High confidence consistency: Statement aligns strongly with world state."
-            elif score > 0.5:
-                rationale = "Weak consistency: Statement seems plausible but evidence is weak."
-            elif score > 0.2:
-                rationale = "Weak contradiction: Statement conflicts slightly with known facts."
-            else:
-                rationale = "Strong contradiction: Statement directly opposes established world state."
-                
-            return score, rationale
+        probs = torch.softmax(logits, dim=1)
+        score = probs[0, 1].item()
+        
+        # Rationale Generation
+        if score > 0.8:
+            rationale = "High confidence consistency: Statement aligns strongly with world state and its negation contradicts."
+        elif score > 0.5:
+            rationale = "Plausible: Statement fits world state better than its negation."
+        elif score > 0.2:
+            rationale = "Doubtful: Statement seems less likely than its negation given the backstory."
+        else:
+            rationale = "Strong contradiction: Backstory strongly favors the negated version of this statement."
+            
+        return score, rationale
 
 def generate_predictions(system, input_file="test.csv", output_file="predictions.csv"):
     """Run batch inference on a CSV and save binary predictions with rationale."""

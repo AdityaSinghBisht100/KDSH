@@ -11,10 +11,8 @@ class CoherenceClassifier(nn.Module):
     def __init__(self, input_dim, device):
         super().__init__()
         self.device = device
-        self.use_gnn = False  # GNN removed
         
         # Input: [Isolated_Emb, Contextual_Emb, Diff, Prod]
-        # Contextual_Emb is derived from Infinite Memory State
         self.net = nn.Sequential(
             nn.Linear(input_dim * 4, 256),
             nn.BatchNorm1d(256),
@@ -22,21 +20,49 @@ class CoherenceClassifier(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(128, 2) # 0: Contradict, 1: Consistent
+            nn.Linear(128, 2)
         )
         
     def forward(self, iso_emb, ctx_emb):
-        """
-        Args:
-           iso_emb: [B, D] - Embedding of content in isolation
-           ctx_emb: [B, D] - Embedding of content given Backstory State
-        """
         features = torch.cat([
             iso_emb, 
             ctx_emb, 
             torch.abs(iso_emb - ctx_emb),
             iso_emb * ctx_emb
+        ], dim=1)
+        return self.net(features)
+
+class HybridCoherenceClassifier(nn.Module):
+    """
+    Advanced Hybrid Classifier utilizing Contrastive Energy features.
+    """
+    def __init__(self, input_dim, device):
+        super().__init__()
+        self.device = device
+        
+        # Features: [Iso, Ctx, Neg_Ctx, Iso-Ctx, Iso-NegCtx, Surprise_Ratio]
+        # input_dim * 5 + 1
+        self.net = nn.Sequential(
+            nn.Linear(input_dim * 5 + 1, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2)
+        )
+        
+    def forward(self, iso_emb, ctx_emb, neg_ctx_emb, surprise_ratio):
+        features = torch.cat([
+            iso_emb,
+            ctx_emb,
+            neg_ctx_emb,
+            torch.abs(iso_emb - ctx_emb),
+            torch.abs(iso_emb - neg_ctx_emb),
+            surprise_ratio.unsqueeze(1)
         ], dim=1)
         return self.net(features)
 

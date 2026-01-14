@@ -13,7 +13,7 @@ from tqdm import tqdm
 # Internal imports from the package
 from .world_state import WorldState, EntityWriteGate, AdaptiveMerge
 from .consistency import CounterfactualChecker, ContrastiveEnergyLoss, SURPRISE_MAX
-from .models import CoherenceClassifier, NarrativeDataset
+from .models import CoherenceClassifier, HybridCoherenceClassifier, NarrativeDataset
 
 # Fix for import resolution
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -43,9 +43,10 @@ class NarrativeConsistencySystem:
         self.device = None
         self.classifier = None
         self.bdh = None
-        # Entity-Aware WorldState: book_name → WorldState
         self.world_states: Dict[str, WorldState] = {}
-        self.backstory_states = {}  # Legacy compatibility
+        self.backstory_states = {}  
+        self.counterfactual_checker = None
+        self.hybrid_classifier = None
         
     def __enter__(self):
         print("--> Starting __enter__ initialization")
@@ -78,37 +79,46 @@ class NarrativeConsistencySystem:
         
         print(f"Initialized on {self.device}")
         
-        self.config = BDHConfig(n_layer=6, n_embd=EMBEDDING_DIM, n_head=4)
+        self.config = BDHConfig(n_layer=12, n_embd=EMBEDDING_DIM, n_head=8)
         self.bdh = BDH(self.config).to(self.device)
         self.bdh.eval()
         
         self.classifier = CoherenceClassifier(EMBEDDING_DIM, self.device).to(self.device)
+        self.hybrid_classifier = HybridCoherenceClassifier(EMBEDDING_DIM, self.device).to(self.device)
+        self.counterfactual_checker = CounterfactualChecker(self.bdh, self.device)
         
         # Load Weights if available
         weights_path = os.path.join(self.model_dir, "narrative_consistency.pt")
+        hybrid_path = os.path.join(self.model_dir, "hybrid_consistency.pt")
+        
         if os.path.exists(weights_path):
             try:
                 self.classifier.load_state_dict(torch.load(weights_path, map_location=self.device), strict=False)
-                print("Loaded classifier weights (strict=False).")
+                print("Loaded base classifier weights.")
             except Exception as e:
                 print(f"Weights load failed: {e}")
-        else:
-            print(f"⚠️  MODEL NOT FOUND: {weights_path}")
-            print(f"    Please download 'narrative_consistency.pt' and 'bdh_base.pt' from Google Drive")
-            print(f"    and place them in the '{self.model_dir}' folder.")
+
+        if os.path.exists(hybrid_path):
+            try:
+                self.hybrid_classifier.load_state_dict(torch.load(hybrid_path, map_location=self.device), strict=False)
+                print("Loaded hybrid classifier weights.")
+            except Exception as e:
+                print(f"Hybrid weights load failed: {e}")
                 
         bdh_path = os.path.join(self.model_dir, "bdh_base.pt")
         if os.path.exists(bdh_path):
-             self.bdh.load_state_dict(torch.load(bdh_path, map_location=self.device), strict=False)
-        else:
-             print(f"⚠️  BDH BASE NOT FOUND: {bdh_path}")
+             try:
+                 self.bdh.load_state_dict(torch.load(bdh_path, map_location=self.device), strict=False)
+                 print("Loaded BDH base weights.")
+             except Exception as e:
+                 print(f"BDH load failed: {e}")
 
         # Import and initialize sentence analyzer
         from sentence_analyzer import SentenceAnalyzer
         self.sentence_analyzer = SentenceAnalyzer(self.bdh, EMBEDDING_DIM, self.device)
 
         self.backstory_store = {}
-        self.backstory_states = {} # Map (book, char) -> Tensor State
+        self.backstory_states = {} 
         print("--> Initialization complete")
 
     def encode_text(self, text_list, distinct_states=None):
