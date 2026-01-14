@@ -32,7 +32,7 @@ def predict_single(system, book_name, char_name, content):
 
     state = system.backstory_states[key].to(system.device)
     
-    checker = CounterfactualChecker(system.bdh, system.device)
+    checker = CounterfactualChecker(system.bdh, system.tokenizer, system.device)
     prediction, confidence_ratio = checker.predict(content, state)
     
     # Map to score for compatibility

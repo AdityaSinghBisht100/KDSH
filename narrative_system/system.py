@@ -68,6 +68,8 @@ class NarrativeConsistencySystem:
         
         # Re-import BDH config to be sure
         from bdh import BDH, BDHConfig
+        # Import tiktoken for BPE
+        import tiktoken
         
         if torch.cuda.is_available():
             self.device = torch.device('cuda')
@@ -78,7 +80,16 @@ class NarrativeConsistencySystem:
         
         print(f"Initialized on {self.device}")
         
-        self.config = BDHConfig(n_layer=6, n_embd=EMBEDDING_DIM, n_head=4)
+        # Initialize BPE Tokenizer
+        try:
+            self.tokenizer = tiktoken.get_encoding("gpt2")
+            vocab_size = self.tokenizer.n_vocab
+            print(f"✅ Tokenizer initialized (Vocab: {vocab_size})")
+        except Exception as e:
+            print(f"❌ Failed to load tiktoken: {e}")
+            raise
+
+        self.config = BDHConfig(n_layer=6, n_embd=EMBEDDING_DIM, n_head=4, vocab_size=vocab_size)
         self.bdh = BDH(self.config).to(self.device)
         self.bdh.eval()
         
@@ -87,7 +98,17 @@ class NarrativeConsistencySystem:
                 
         bdh_path = os.path.join(self.model_dir, "bdh_base.pt")
         if os.path.exists(bdh_path):
-             self.bdh.load_state_dict(torch.load(bdh_path, map_location=self.device), strict=False)
+             try:
+                 # Strict=False to allow shape mismatch if we are reloading old weights (though they won't work well)
+                 # Actually, shape mismatch on Embedding will error out even with strict=False usually unless filtered.
+                 # Ideally we should ignore mismatch keys.
+                 state_dict = torch.load(bdh_path, map_location=self.device)
+                 if state_dict['embed.weight'].shape[0] != vocab_size:
+                     print("⚠️  Vocab size mismatch (Old model). Starting fresh.")
+                 else:
+                     self.bdh.load_state_dict(state_dict, strict=False)
+             except Exception as e:
+                 print(f"⚠️  Weight load error: {e}")
         else:
              print(f"⚠️  BDH BASE NOT FOUND: {bdh_path}")
 
@@ -108,8 +129,16 @@ class NarrativeConsistencySystem:
             
         batch_tensors = []
         for text in text_list:
-            # Simple truncation/encoding
-            tokens = torch.tensor([ord(c) % 256 for c in text[:MAX_SEQ_LEN]], dtype=torch.long, device=self.device)
+            # BPE Tokenization
+            # tiktoken encodes to list of ints
+            tokens_list = self.tokenizer.encode(text)
+            
+            # Truncate if too long (though BDH handles infinite, we batch here)
+            if len(tokens_list) > MAX_SEQ_LEN:
+                tokens_list = tokens_list[:MAX_SEQ_LEN]
+            
+            tokens = torch.tensor(tokens_list, dtype=torch.long, device=self.device)
+                
             if len(tokens) == 0:
                  tokens = torch.zeros(1, dtype=torch.long, device=self.device)
             batch_tensors.append(tokens)

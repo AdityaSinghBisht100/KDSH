@@ -15,7 +15,8 @@ image = (
         "torch",
         "pandas", 
         "tqdm",
-        "numpy"
+        "numpy",
+        "tiktoken"
     )
     .copy_local_dir(".", "/root/bdh", ignore=[".git", "__pycache__", "*.pt", "models/"])
 )

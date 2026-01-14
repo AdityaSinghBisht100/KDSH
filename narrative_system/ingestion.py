@@ -109,8 +109,8 @@ def ingest_novel_knowledge(system, train_df, test_mode=True):
         print("  ✅ Cache saved.")
 
 def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
-    # Optimization: Larger chunk size for faster ingestion on GPU
-    chunk_size = 2048 
+    # Optimization: Chunk size in TOKENS (approx 4 chars per token)
+    chunk_size = 1024 
     
     system.bdh.reset_state()
     initial_state = system.bdh.get_state().cpu()
@@ -123,7 +123,7 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
     
     entity_update_counts = {e: 0 for e in entities}
     gate_values = {e: [] for e in entities} 
-    entity_memories = {e: [] for e in entities} # New: Sentence Memory 
+    entity_memories = {e: [] for e in entities} 
     
     state_dim = initial_state.numel()
     write_gate = EntityWriteGate(state_dim=64, proj_dim=32).to(system.device)
@@ -131,54 +131,61 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
     
     current_time = 0.0
     
-    # Calculate total chunks for progress bar
-    total_chunks = (len(text) + chunk_size - 1) // chunk_size
+    # BPE Tokenization (Full Text)
+    # This replaces the character-based chunking
+    print("    -> Tokenizing full text (BPE)...")
+    all_tokens_ids = system.tokenizer.encode(text)
+    total_tokens = len(all_tokens_ids)
+    total_chunks = (total_tokens + chunk_size - 1) // chunk_size
     
     with torch.no_grad():
         with tqdm(total=total_chunks, desc="  Processing Chunks", unit="chunk", leave=False) as pbar:
-            for i in range(0, len(text), chunk_size):
-                chunk = text[i : i + chunk_size]
-                tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=system.device)
-                if tokens.size(1) == 0:
-                    pbar.update(1)
-                    continue
+            for i in range(0, total_tokens, chunk_size):
+                chunk_ids = all_tokens_ids[i : i + chunk_size]
+                chunk_len = len(chunk_ids)
+                
+                # Convert to tensor
+                tokens = torch.tensor([chunk_ids], dtype=torch.long, device=system.device)
+                
+                # Decode for Entity Aware Logic (String Matching)
+                chunk_text = system.tokenizer.decode(chunk_ids)
                 
                 current_time += 1.0
                 
+                # Global State Update
                 system.bdh.reset_state()
                 system.bdh.set_state(global_state.detach().clone().to(system.device))
                 system.bdh(tokens, use_state=True)
                 global_state = system.bdh.get_state().cpu()
                 global_timestamp = current_time
                 
-                chunk_lower = chunk.lower()
+                chunk_lower = chunk_text.lower()
                 mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
                 chunk_emb = global_state
                 
-                # New: Save sentence-level evidence
+                # Save sentence-level evidence
                 if mentioned_entities:
-                    # Simple sentence splitting
-                    sentences = [s.strip() for s in chunk.replace('?', '.').replace('!', '.').split('.') if len(s.split()) > 4]
+                    # Simple sentence splitting on the decoded text
+                    sentences = [s.strip() for s in chunk_text.replace('?', '.').replace('!', '.').split('.') if len(s.split()) > 4]
                     for sent in sentences:
                         sent_lower = sent.lower()
                         for entity in mentioned_entities:
                             if entity.lower() in sent_lower:
-                                # Encode sentence as evidence (detached from graph)
+                                # Encode sentence as evidence
                                 with torch.no_grad():
-                                    sent_tokens = torch.tensor([[ord(c) % 256 for c in sent]], dtype=torch.long, device=system.device)
+                                    # Encode sentence with BPE
+                                    sent_ids = system.tokenizer.encode(sent)
+                                    sent_tokens = torch.tensor([sent_ids], dtype=torch.long, device=system.device)
+                                    
                                     if sent_tokens.size(1) > 0:
-                                        # Use system's encode mechanism or raw BDH (raw is simpler here as we just need vector)
-                                        # Use system.encode_text for consistency if possible, but we are inside ingestion.
-                                        # Let's simple-encode:
                                         system.bdh.reset_state()
                                         e_seq = system.bdh(sent_tokens, use_state=False, return_embeddings=True)
                                         sent_vec = e_seq.mean(dim=1).cpu() # [1, D]
                                         
-                                        # Limit memory to 200 items per entity to prevent explosion
                                         if len(entity_memories[entity]) < 200:
                                             entity_memories[entity].append((sent_vec, sent))
 
-                
+                # Entity State Updates
                 for entity in mentioned_entities:
                     old_state = entity_states[entity].detach().clone()
                     

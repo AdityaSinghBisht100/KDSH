@@ -54,7 +54,8 @@ def run_training_step(system, train_df, loss_fn, batch_size=4):
         lr=5e-5 # Lower learning rate for stability
     )
     
-    checker = CounterfactualChecker(system.bdh, system.device)
+    # Initialize consistency checker with BPE tokenizer
+    checker = CounterfactualChecker(system.bdh, system.tokenizer, system.device)
     
     total_loss = 0
     num_batches = (len(train_df) + batch_size - 1) // batch_size

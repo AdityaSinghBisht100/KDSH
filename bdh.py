@@ -15,7 +15,7 @@ class BDHConfig:
     dropout: float = 0.1
     n_head: int = 4
     mlp_internal_dim_multiplier: int = 128
-    vocab_size: int = 256
+    vocab_size: int = 50257
     # Temporal conditioning parameters
     temporal_dim: int = 64       # Temporal embedding dimension
     use_temporal: bool = True    # Enable temporal-conditioned updates

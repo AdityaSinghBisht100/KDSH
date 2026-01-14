@@ -57,10 +57,10 @@ class CounterfactualChecker:
     If negation causes MORE surprise → CONSISTENT
     """
     
-    def __init__(self, bdh_model, device):
+    def __init__(self, bdh_model, tokenizer, device):
         self.bdh = bdh_model
+        self.tokenizer = tokenizer
         self.device = device
-        
         
         # Enhanced Negation patterns (Ordered by specificity)
         # Group 1: Remove existing negation (Toggle)
@@ -105,8 +105,9 @@ class CounterfactualChecker:
         return f"It is false that {statement}"
     
     def encode_text(self, text: str) -> torch.Tensor:
-        """Convert text to byte tokens."""
-        tokens = torch.tensor([[ord(c) % 256 for c in text]], dtype=torch.long, device=self.device)
+        """Convert text to BPE tokens."""
+        ids = self.tokenizer.encode(text)
+        tokens = torch.tensor([ids], dtype=torch.long, device=self.device)
         return tokens
     
     def compute_surprise(self, text: str, world_state: torch.Tensor, 
