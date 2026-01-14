@@ -13,7 +13,7 @@ from tqdm import tqdm
 # Internal imports from the package
 from .world_state import WorldState, EntityWriteGate, AdaptiveMerge
 from .consistency import CounterfactualChecker, ContrastiveEnergyLoss, SURPRISE_MAX
-from .models import CoherenceClassifier, NarrativeDataset
+from .models import NarrativeDataset
 
 # Fix for import resolution
 current_dir = os.path.dirname(os.path.abspath(__file__))
