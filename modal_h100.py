@@ -8,7 +8,7 @@ app = modal.App("bdh-narrative-consistency")
 model_volume = modal.Volume.from_name("bdh-model-vol", create_if_missing=True)
 
 # Define the environment (Container Image)
-# v14 - Increase capacity to 64
+# v16 - Max Fidelity Checkpointed
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
