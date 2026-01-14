@@ -33,8 +33,14 @@ def train(system, epochs=20):
     # Margin 0.3 means we want Gap > 0.3
     loss_fn = ContrastiveEnergyLoss(margin=0.5).to(system.device)
     
+    # Initialize Optimizer ONCE to preserve momentum across epochs
+    optimizer = torch.optim.Adam(
+        system.bdh.parameters(),
+        lr=5e-5 # Lower learning rate for stability
+    )
+    
     for epoch in range(epochs):
-            loss = run_training_step(system, train_df, loss_fn)
+            loss = run_training_step(system, train_df, loss_fn, optimizer)
             acc = evaluate_accuracy(system, test_df)
             print(f"Epoch {epoch+1}/{epochs}: Loss={loss:.4f} Acc={acc:.2%}")
             
@@ -45,13 +51,12 @@ def train(system, epochs=20):
     final_acc = evaluate_accuracy(system, test_df)
     print(f"Final Model Accuracy on Dataset: {final_acc:.2%}")
 
-def run_training_step(system, train_df, loss_fn, batch_size=4):
+def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
     system.bdh.train()
     
-    optimizer = torch.optim.Adam(
-        system.bdh.parameters(),
-        lr=5e-5 # Lower learning rate for stability
-    )
+    # Optimizer is now passed in
+    
+    # Initialize consistency checker with BPE tokenizer
     
     # Initialize consistency checker with BPE tokenizer
     checker = CounterfactualChecker(system.bdh, system.tokenizer, system.device)

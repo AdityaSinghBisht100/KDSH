@@ -5,6 +5,7 @@ import math
 
 import torch
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from torch import nn
 
 
@@ -14,7 +15,7 @@ class BDHConfig:
     n_embd: int = 256
     dropout: float = 0.1
     n_head: int = 4
-    mlp_internal_dim_multiplier: int = 64 # Increased to 64 (approx 50GB VRAM usage) to fix model collapse
+    mlp_internal_dim_multiplier: int = 128 # MAX FIDELITY: 128 (Requires Gradient Checkpointing)
     vocab_size: int = 50257
     # Temporal conditioning parameters
     temporal_dim: int = 64       # Temporal embedding dimension
@@ -222,6 +223,17 @@ class TemporalLinearAttention(LinearAttention):
         return decay.clamp(0.01, 1.0)  # Never fully forget
     
     def forward(self, Q, K, V, use_state=False, layer_idx=0, return_new_state=False, initial_state=None):
+        # MAX FIDELITY MODE: Use Gradient Checkpointing to fit large state in VRAM
+        if self.training and return_new_state and Q.requires_grad: 
+             def custom_forward(q, k, v, init_state):
+                 return self.forward_temporal(q, k, v, 0, 0, use_state, layer_idx, return_new_state, init_state)
+             
+             return torch.utils.checkpoint.checkpoint(
+                 custom_forward,
+                 Q, K, V, initial_state,
+                 use_reentrant=False
+             )
+        
         return self.forward_temporal(Q, K, V, 0, 0, use_state, layer_idx, return_new_state, initial_state)
 
     def forward_temporal(self, Q, K, V, chapter_idx: int = 0, timestep: int = 0, 
