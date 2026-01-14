@@ -1,4 +1,3 @@
-
 import os
 import torch
 import torch.nn as nn
@@ -7,7 +6,7 @@ from tqdm import tqdm
 from .ingestion import ingest_novel_knowledge
 from .consistency import ContrastiveEnergyLoss, CounterfactualChecker
 
-def train(system, epochs=5):
+def train(system, epochs=20):
     print(f"Starting Training on {system.device}...")
     system._initialize_components()
     

@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import pandas as pd
@@ -278,7 +277,7 @@ class NarrativeConsistencySystem:
         from .inference import predict_single
         return predict_single(self, book_name, char_name, content)
 
-    def train(self, epochs=5):
+    def train(self, epochs=20):
         from .training import train
         train(self, epochs)
 

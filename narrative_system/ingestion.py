@@ -110,7 +110,7 @@ def ingest_novel_knowledge(system, train_df, test_mode=True):
 
 def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
     # Optimization: Chunk size in TOKENS (approx 4 chars per token)
-    chunk_size = 1024 
+    chunk_size = 256
     
     system.bdh.reset_state()
     initial_state = system.bdh.get_state().cpu()
