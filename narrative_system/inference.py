@@ -69,9 +69,13 @@ def generate_predictions(system, input_file="test.csv", output_file="predictions
     
     with torch.no_grad():
         for _, row in tqdm(df.iterrows(), total=len(df), desc="Predicting", unit="sample"):
-            book = row.get('book_name', '')
-            char = row.get('char', '')
-            content = row.get('content', '')
+            book = str(row.get('book_name', '')).strip() if pd.notna(row.get('book_name')) else ''
+            char = str(row.get('char', '')).strip() if pd.notna(row.get('char')) else ''
+            content = str(row.get('content', '')).strip() if pd.notna(row.get('content')) else ''
+            
+            if book == 'nan': book = ''
+            if char == 'nan': char = ''
+            if content == 'nan': content = ''
             
             # Note: calling predict_single from this module, passing system
             score, rationale = predict_single(system, book, char, content)

@@ -97,13 +97,22 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
             system.bdh.reset_state()
             world_state = system.bdh.get_state()
         
+        if pd.isna(content) or not str(content).strip():
+            pbar.update(1)
+            continue
+            
+        content = str(content).strip()
         optimizer.zero_grad()
         
         # In GPT-2 style training, we train on the context chunks
         # to maximize the likelihood of the text.
         # This makes the PMI check effective because the model will recognize "known" facts.
         
-        tokens = torch.tensor([system.tokenizer.encode(content)], device=system.device)
+        tokens_list = system.tokenizer.encode(content)
+        if len(tokens_list) < 2:
+            tokens_list = tokens_list + [0]
+            
+        tokens = torch.tensor([tokens_list], device=system.device)
         targets = tokens.clone()
         
         logits, loss = system.bdh(tokens, targets=targets, use_state=True)

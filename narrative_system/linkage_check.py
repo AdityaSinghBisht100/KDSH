@@ -17,7 +17,14 @@ class NarrativeLinkageChecker:
         Calculates the average log-probability of a text.
         """
         # 1. Encode
-        tokens = torch.tensor([self.tokenizer.encode(text)], device=self.device)
+        text = str(text).strip()
+        tokens_list = self.tokenizer.encode(text) if text else [0]
+        
+        # Handle too short sequences for causal shift
+        if len(tokens_list) < 2:
+             tokens_list = tokens_list + [0]
+             
+        tokens = torch.tensor([tokens_list], device=self.device)
         targets = tokens.clone()
         
         # 2. Forward pass
