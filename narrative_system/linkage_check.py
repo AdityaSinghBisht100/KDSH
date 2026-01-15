@@ -49,7 +49,9 @@ class NarrativeLinkageChecker:
         if backstory_state is not None:
              # Load state into model before checking
              for i, block in enumerate(self.model.transformer.h):
-                 block.attn.state.copy_(backstory_state[i])
+                 if backstory_state[i].shape != block.attn.state.shape:
+                      continue # Skip incompatible states or handle error
+                 block.attn.state.copy_(backstory_state[i].to(self.device))
         
         lp_conditional = self.compute_log_likelihood(statement, use_backstory=True)
         

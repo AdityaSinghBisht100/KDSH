@@ -18,12 +18,18 @@ def ingest_novel_knowledge(system, train_df, test_mode=True):
         print(f"  ✨ Loading knowledge from disk (skipping raw text ingestion)...")
         try:
             cached_data = torch.load(cache_path, weights_only=False)
+            # Validation: Check first state shape
+            test_key = list(cached_data['backstory_states'].keys())[0]
+            test_state = cached_data['backstory_states'][test_key][0]
+            if test_state.shape[-1] != system.config.n_embd // system.config.n_head:
+                 raise ValueError("Cache shape mismatch (Different Architecture)")
+                 
             system.world_states = cached_data['world_states']
             system.backstory_states = cached_data['backstory_states']
             print(f"  ✅ Loaded state for {len(system.world_states)} books. Jumping to Phase 2.")
             return
         except Exception as e:
-            print(f"  ⚠️ Error loading cache: {e}. Re-ingesting...")
+            print(f"  ⚠️ Cache Incompatible: {e}. Re-ingesting...")
     
     system.bdh.eval()
     
