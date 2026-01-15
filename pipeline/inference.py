@@ -3,9 +3,10 @@ Inference Pipeline for BDH
 
 Uses the trained BDH model to predict narrative consistency.
 
-Two strategies:
+Three strategies:
 1. Perplexity-based: Compare perplexity of statement with/without backstory
 2. Classifier-based: Use the trained consistency classifier
+3. SBERT-based: Use SBERT embeddings with optional rationale generation
 """
 import os
 import torch
@@ -14,7 +15,7 @@ import pandas as pd
 from typing import List, Dict, Tuple, Optional
 from tqdm import tqdm
 
-from bdh import BDH_GPU, BDHConfig, ByteTokenizer
+from bdh import BDH_GPU, BDHConfig, ByteTokenizer, SBERTEncoder, RationaleDecoder
 
 
 def predict_with_perplexity(
@@ -304,3 +305,216 @@ def generate_predictions(
     print(f"✅ Saved predictions to {output_path}")
     
     return result_df
+
+
+# =============================================================================
+# SBERT-based Inference (Sentence-level embeddings)
+# =============================================================================
+
+def predict_with_sbert(
+    model: BDH_GPU,
+    classifier: nn.Module,
+    sbert_encoder: SBERTEncoder,
+    backstory: str,
+    statement: str,
+    device: str = "cuda"
+) -> Tuple[str, float, str]:
+    """
+    Predict consistency using SBERT embeddings.
+    
+    Args:
+        model: BDH model with SBERT input support
+        classifier: Trained consistency classifier
+        sbert_encoder: SBERT encoder instance
+        backstory: Character backstory text
+        statement: Statement to check
+        device: Device to use
+    
+    Returns:
+        (prediction, confidence, rationale)
+    """
+    model.eval()
+    classifier.eval()
+    
+    with torch.no_grad():
+        # Encode with SBERT
+        backstory_embeds = sbert_encoder.encode_text(backstory)
+        statement_embeds = sbert_encoder.encode_text(statement)
+        
+        # Concatenate and add batch dimension
+        full_embeds = torch.cat([backstory_embeds, statement_embeds], dim=0)
+        full_embeds = full_embeds.unsqueeze(0).to(device)  # [1, seq, sbert_dim]
+        
+        # Forward through BDH
+        _, state = model.forward(inputs_embeds=full_embeds)
+        
+        # Get state representation
+        state_rep = model.get_state_representation(state)
+        if state_rep is None:
+            state_rep = torch.zeros(1, model.config.n_neurons, device=device)
+        
+        # Classify
+        logits = classifier(state_rep)
+        probs = torch.softmax(logits, dim=-1)
+        pred_idx = logits.argmax(dim=-1).item()
+        confidence = probs[0, pred_idx].item()
+        
+        prediction = "consistent" if pred_idx == 1 else "contradict"
+        rationale = f"SBERT-based prediction. Confidence: {confidence:.2%}"
+    
+    return prediction, confidence, rationale
+
+
+def predict_with_rationale(
+    model: BDH_GPU,
+    decoder: RationaleDecoder,
+    sbert_encoder: SBERTEncoder,
+    backstory: str,
+    statement: str,
+    device: str = "cuda",
+    max_new_tokens: int = 50
+) -> Tuple[str, str]:
+    """
+    Predict with rationale generation.
+    
+    Args:
+        model: BDH model
+        decoder: RationaleDecoder instance
+        sbert_encoder: SBERT encoder
+        backstory: Character backstory
+        statement: Statement to check
+        device: Device
+        max_new_tokens: Max tokens for rationale
+    
+    Returns:
+        (prediction, rationale_text)
+    """
+    model.eval()
+    decoder.eval()
+    
+    with torch.no_grad():
+        # Encode full context
+        full_text = backstory + "\n\n" + statement
+        embeds = sbert_encoder.encode_text(full_text).unsqueeze(0).to(device)
+        
+        # Forward through BDH
+        _, state = model.forward(inputs_embeds=embeds)
+        bdh_state = model.get_state_representation(state)
+        
+        if bdh_state is None:
+            return "unknown", "Could not generate rationale (no state)"
+        
+        # Generate rationale
+        rationales = decoder.generate(
+            bdh_state,
+            max_new_tokens=max_new_tokens,
+            prompt="The statement is "
+        )
+        
+        rationale = rationales[0] if rationales else ""
+        
+        # Extract prediction from rationale
+        rationale_lower = rationale.lower()
+        if "consistent" in rationale_lower:
+            prediction = "consistent"
+        elif "contradict" in rationale_lower:
+            prediction = "contradict"
+        else:
+            prediction = "consistent"  # Default
+    
+    return prediction, rationale
+
+
+def generate_sbert_predictions(
+    model: BDH_GPU,
+    classifier: nn.Module,
+    test_df: pd.DataFrame,
+    novel_dir: str,
+    output_path: str,
+    device: str = "cuda",
+    decoder: Optional[RationaleDecoder] = None
+) -> pd.DataFrame:
+    """
+    Generate predictions using SBERT embeddings.
+    
+    Args:
+        model: BDH model with SBERT support
+        classifier: Trained consistency classifier
+        test_df: Test DataFrame
+        novel_dir: Directory containing novels
+        output_path: Where to save predictions
+        device: Device to use
+        decoder: Optional RationaleDecoder for generating explanations
+    
+    Returns:
+        DataFrame with predictions
+    """
+    print("\n=== Generating SBERT Predictions ===")
+    
+    model = model.to(device)
+    model.eval()
+    classifier = classifier.to(device)
+    classifier.eval()
+    
+    # Initialize SBERT encoder
+    sbert_encoder = SBERTEncoder(
+        model_name=model.config.sbert_model,
+        device=device
+    )
+    
+    if decoder is not None:
+        decoder = decoder.to(device)
+        decoder.eval()
+    
+    results = []
+    
+    for _, row in tqdm(test_df.iterrows(), total=len(test_df), desc="Predicting"):
+        row_id = row.get('id', 0)
+        book_name = str(row.get('book_name', '')).strip()
+        character = str(row.get('char', '')).strip()
+        caption = str(row.get('caption', '')).strip()
+        content = str(row.get('content', '')).strip()
+        
+        if not content:
+            results.append({
+                'id': row_id,
+                'prediction': 1,
+                'rationale': 'Empty content'
+            })
+            continue
+        
+        # Get backstory
+        backstory = get_backstory_from_novel(book_name, character, novel_dir, caption=caption)
+        
+        if not backstory:
+            results.append({
+                'id': row_id,
+                'prediction': 1,
+                'rationale': 'No backstory found'
+            })
+            continue
+        
+        # Predict with or without rationale generation
+        if decoder is not None:
+            pred, rationale = predict_with_rationale(
+                model, decoder, sbert_encoder, backstory, content, device
+            )
+            confidence = 0.0  # Not available with decoder
+        else:
+            pred, confidence, rationale = predict_with_sbert(
+                model, classifier, sbert_encoder, backstory, content, device
+            )
+        
+        results.append({
+            'id': row_id,
+            'prediction': 1 if pred == 'consistent' else 0,
+            'rationale': rationale
+        })
+    
+    # Save
+    result_df = pd.DataFrame(results)
+    result_df.to_csv(output_path, index=False)
+    print(f"✅ Saved SBERT predictions to {output_path}")
+    
+    return result_df
+

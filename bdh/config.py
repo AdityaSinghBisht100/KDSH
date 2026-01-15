@@ -42,6 +42,16 @@ class BDHConfig:
     # Entity Tracking via Multi-Head Attention
     n_heads: int = 16           # Number of heads for matrix attention
     
+    # SBERT Encoder Configuration
+    use_sbert: bool = True                      # Use SBERT embeddings instead of byte tokens
+    sbert_model: str = 'all-MiniLM-L6-v2'       # SBERT model name
+    sbert_dim: int = 384                        # SBERT embedding dimension
+    
+    # GPT-2 Decoder Configuration (for rationale generation)
+    gpt2_model: str = 'gpt2'                    # GPT-2 model name
+    gpt2_dim: int = 768                         # GPT-2 embedding dimension
+    rationale_prefix_len: int = 10              # Number of prefix tokens for rationale
+    
     @property
     def head_dim(self) -> int:
         """Dimension per attention head."""

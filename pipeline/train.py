@@ -7,6 +7,8 @@ Two-phase training:
    
 2. Consistency Fine-tuning: Fine-tune on labeled consistency pairs.
    This teaches the model to classify statements as consistent/contradictory.
+
+Extended with SBERT support for sentence-level embeddings and GPT-2 rationale decoder.
 """
 import os
 import torch
@@ -17,7 +19,7 @@ from typing import List, Dict, Optional, Tuple
 from tqdm import tqdm
 import pandas as pd
 
-from bdh import BDH_GPU, BDHConfig, ByteTokenizer
+from bdh import BDH_GPU, BDHConfig, ByteTokenizer, SBERTEncoder, RationaleDecoder
 
 
 class NovelDataset(Dataset):
@@ -537,3 +539,390 @@ def contrastive_finetune(
         print(f"Saved contrastive-finetuned model to {save_path}")
     
     return model
+
+
+# =============================================================================
+# SBERT-based Training (Sentence-level embeddings)
+# =============================================================================
+
+class SBERTConsistencyDataset(Dataset):
+    """
+    Dataset for consistency classification using SBERT embeddings.
+    
+    Each sample contains:
+    - backstory_text: The accumulated character context (raw text)
+    - statement_text: The statement to check (raw text)
+    - label: 1 if consistent, 0 if contradiction
+    """
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        novel_dir: str,
+        sbert_encoder: SBERTEncoder,
+        max_backstory_sentences: int = 50,
+        max_statement_sentences: int = 10
+    ):
+        self.sbert_encoder = sbert_encoder
+        self.max_backstory_sentences = max_backstory_sentences
+        self.max_statement_sentences = max_statement_sentences
+        self.samples = []
+        
+        # Cache novels
+        self.novel_cache = {}
+        
+        for _, row in df.iterrows():
+            book_name = str(row.get('book_name', '')).strip()
+            char = str(row.get('char', '')).strip()
+            content = str(row.get('content', '')).strip()
+            label_str = str(row.get('label', '')).strip().lower()
+            
+            if not content:
+                continue
+            
+            # Get label
+            label = 1 if label_str == 'consistent' else 0
+            
+            # Get backstory
+            backstory = self._get_backstory(book_name, char, novel_dir)
+            
+            self.samples.append({
+                'backstory': backstory,
+                'statement': content,
+                'label': label,
+                'book': book_name,
+                'char': char
+            })
+    
+    def _get_backstory(self, book_name: str, char: str, novel_dir: str) -> str:
+        """Extract backstory for a character from a novel."""
+        import glob
+        
+        # Find novel file
+        novel_path = None
+        book_lower = book_name.lower().strip()
+        txt_files = glob.glob(os.path.join(novel_dir, "*.txt"))
+        
+        for txt_file in txt_files:
+            filename = os.path.basename(txt_file).lower()
+            if book_lower in filename or filename.replace('.txt', '') in book_lower:
+                novel_path = txt_file
+                break
+        
+        if novel_path is None:
+            return ""
+        
+        # Load novel (cached)
+        if novel_path not in self.novel_cache:
+            with open(novel_path, 'r', encoding='utf-8', errors='replace') as f:
+                self.novel_cache[novel_path] = f.read()
+        
+        text = self.novel_cache[novel_path]
+        
+        # Extract paragraphs mentioning character
+        char_lower = char.lower()
+        relevant = []
+        for para in text.split('\n\n'):
+            if char_lower in para.lower():
+                relevant.append(para.strip())
+        
+        # Combine (limited length)
+        backstory = '\n'.join(relevant[:30])
+        return backstory[:16384]  # Limit characters
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        
+        # Encode with SBERT
+        backstory_embeds = self.sbert_encoder.encode_text(sample['backstory'])
+        statement_embeds = self.sbert_encoder.encode_text(sample['statement'])
+        
+        # Limit sentence count
+        if backstory_embeds.shape[0] > self.max_backstory_sentences:
+            backstory_embeds = backstory_embeds[:self.max_backstory_sentences]
+        if statement_embeds.shape[0] > self.max_statement_sentences:
+            statement_embeds = statement_embeds[:self.max_statement_sentences]
+        
+        return {
+            'backstory': backstory_embeds,  # [num_sentences, sbert_dim]
+            'statement': statement_embeds,  # [num_sentences, sbert_dim]
+            'label': torch.tensor(sample['label'], dtype=torch.long)
+        }
+
+
+def collate_sbert_consistency(batch: List[Dict]) -> Dict:
+    """Collate function for SBERT consistency dataset with padding."""
+    max_back_len = max(b['backstory'].shape[0] for b in batch)
+    max_stmt_len = max(b['statement'].shape[0] for b in batch)
+    sbert_dim = batch[0]['backstory'].shape[1]
+    
+    backstories = []
+    statements = []
+    labels = []
+    
+    for b in batch:
+        # Pad backstory
+        back = b['backstory']
+        pad_len = max_back_len - back.shape[0]
+        if pad_len > 0:
+            padding = torch.zeros(pad_len, sbert_dim, device=back.device)
+            back = torch.cat([back, padding], dim=0)
+        backstories.append(back)
+        
+        # Pad statement
+        stmt = b['statement']
+        pad_len = max_stmt_len - stmt.shape[0]
+        if pad_len > 0:
+            padding = torch.zeros(pad_len, sbert_dim, device=stmt.device)
+            stmt = torch.cat([stmt, padding], dim=0)
+        statements.append(stmt)
+        
+        labels.append(b['label'])
+    
+    return {
+        'backstory': torch.stack(backstories),  # [batch, max_back_len, sbert_dim]
+        'statement': torch.stack(statements),   # [batch, max_stmt_len, sbert_dim]
+        'label': torch.stack(labels)            # [batch]
+    }
+
+
+def train_sbert_consistency(
+    model: BDH_GPU,
+    train_df: pd.DataFrame,
+    novel_dir: str,
+    epochs: int = 10,
+    batch_size: int = 8,
+    lr: float = 1e-4,
+    device: str = "cuda",
+    save_path: Optional[str] = None
+) -> Tuple[BDH_GPU, nn.Module]:
+    """
+    Train consistency classifier using SBERT embeddings.
+    
+    Uses SBERT for semantic sentence embeddings instead of bytes.
+    """
+    print("\n=== SBERT Consistency Training ===")
+    
+    model = model.to(device)
+    
+    # Initialize SBERT encoder
+    sbert_encoder = SBERTEncoder(
+        model_name=model.config.sbert_model,
+        device=device
+    )
+    
+    # Create dataset
+    dataset = SBERTConsistencyDataset(train_df, novel_dir, sbert_encoder)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        collate_fn=collate_sbert_consistency
+    )
+    
+    print(f"Training on {len(dataset)} samples with SBERT embeddings")
+    
+    # Classifier head: takes BDH state representation
+    classifier = nn.Sequential(
+        nn.Linear(model.config.n_neurons, model.config.n_neurons // 4),
+        nn.ReLU(),
+        nn.Dropout(0.1),
+        nn.Linear(model.config.n_neurons // 4, 2)
+    ).to(device)
+    
+    # Optimizer (train both BDH and classifier)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(classifier.parameters()),
+        lr=lr
+    )
+    criterion = nn.CrossEntropyLoss()
+    
+    model.train()
+    classifier.train()
+    
+    for epoch in range(epochs):
+        total_loss = 0
+        correct = 0
+        total = 0
+        
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
+        
+        for batch in pbar:
+            backstory = batch['backstory'].to(device)  # [batch, seq, sbert_dim]
+            statement = batch['statement'].to(device)  # [batch, seq, sbert_dim]
+            labels = batch['label'].to(device)
+            
+            optimizer.zero_grad()
+            
+            # Concatenate backstory and statement for full context
+            # [batch, back_len + stmt_len, sbert_dim]
+            full_input = torch.cat([backstory, statement], dim=1)
+            
+            # Forward through BDH with SBERT embeddings
+            _, state = model.forward(inputs_embeds=full_input)
+            
+            # Get state representation
+            state_rep = model.get_state_representation(state)
+            if state_rep is None:
+                state_rep = torch.zeros(backstory.shape[0], model.config.n_neurons, device=device)
+            
+            # Classify
+            logits = classifier(state_rep)
+            loss = criterion(logits, labels)
+            
+            # Backward
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            total_loss += loss.item()
+            preds = logits.argmax(dim=-1)
+            correct += (preds == labels).sum().item()
+            total += labels.shape[0]
+            
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{correct/total:.2%}'})
+        
+        avg_loss = total_loss / len(dataloader)
+        accuracy = correct / total
+        print(f"Epoch {epoch+1}: Loss = {avg_loss:.4f}, Accuracy = {accuracy:.2%}")
+    
+    # Save
+    if save_path:
+        torch.save({
+            'model': model.state_dict(),
+            'classifier': classifier.state_dict()
+        }, save_path)
+        print(f"Saved SBERT-trained model to {save_path}")
+    
+    return model, classifier
+
+
+def train_with_rationale(
+    model: BDH_GPU,
+    decoder: RationaleDecoder,
+    train_df: pd.DataFrame,
+    novel_dir: str,
+    epochs: int = 5,
+    batch_size: int = 4,
+    lr: float = 1e-4,
+    device: str = "cuda",
+    save_path: Optional[str] = None
+) -> Tuple[BDH_GPU, RationaleDecoder]:
+    """
+    Train BDH model and rationale decoder together.
+    
+    Requires 'rationale' column in train_df with ground-truth explanations.
+    """
+    print("\n=== Training with Rationale Generation ===")
+    
+    model = model.to(device)
+    decoder = decoder.to(device)
+    
+    # Initialize SBERT encoder
+    sbert_encoder = SBERTEncoder(
+        model_name=model.config.sbert_model,
+        device=device
+    )
+    
+    # Optimizer (train BDH input_proj and decoder connector)
+    trainable_params = list(model.input_proj.parameters()) + list(decoder.connector.parameters())
+    optimizer = torch.optim.AdamW(trainable_params, lr=lr)
+    
+    model.train()
+    decoder.train()
+    
+    for epoch in range(epochs):
+        total_loss = 0
+        
+        pbar = tqdm(train_df.iterrows(), total=len(train_df), desc=f"Epoch {epoch+1}/{epochs}")
+        
+        for idx, row in pbar:
+            book_name = str(row.get('book_name', '')).strip()
+            char = str(row.get('char', '')).strip()
+            content = str(row.get('content', '')).strip()
+            rationale = str(row.get('rationale', '')).strip()
+            
+            if not content or not rationale:
+                continue
+            
+            # Get backstory
+            backstory = get_backstory_for_sbert(book_name, char, novel_dir)
+            if not backstory:
+                continue
+            
+            optimizer.zero_grad()
+            
+            # Encode with SBERT
+            full_text = backstory + "\n\n" + content
+            embeds = sbert_encoder.encode_text(full_text).unsqueeze(0)  # [1, seq, sbert_dim]
+            
+            # Forward through BDH
+            _, state = model.forward(inputs_embeds=embeds)
+            bdh_state = model.get_state_representation(state)
+            
+            if bdh_state is None:
+                continue
+            
+            # Tokenize rationale
+            rationale_ids = decoder.tokenizer.encode(
+                rationale, 
+                return_tensors='pt',
+                max_length=128,
+                truncation=True
+            ).to(device)
+            
+            # Train decoder
+            _, loss = decoder(bdh_state, rationale_ids)
+            
+            if loss is not None:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+                optimizer.step()
+                
+                total_loss += loss.item()
+                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        
+        avg_loss = total_loss / max(1, len(train_df))
+        print(f"Epoch {epoch+1}: Avg Loss = {avg_loss:.4f}")
+    
+    # Save
+    if save_path:
+        torch.save({
+            'model': model.state_dict(),
+            'decoder': decoder.state_dict()
+        }, save_path)
+        print(f"Saved model with rationale decoder to {save_path}")
+    
+    return model, decoder
+
+
+def get_backstory_for_sbert(book_name: str, char: str, novel_dir: str) -> str:
+    """Helper function to get backstory text for SBERT encoding."""
+    import glob
+    
+    novel_path = None
+    book_lower = book_name.lower().strip()
+    txt_files = glob.glob(os.path.join(novel_dir, "*.txt"))
+    
+    for txt_file in txt_files:
+        filename = os.path.basename(txt_file).lower()
+        if book_lower in filename or filename.replace('.txt', '') in book_lower:
+            novel_path = txt_file
+            break
+    
+    if novel_path is None:
+        return ""
+    
+    with open(novel_path, 'r', encoding='utf-8', errors='replace') as f:
+        text = f.read()
+    
+    char_lower = char.lower()
+    relevant = []
+    for para in text.split('\n\n'):
+        if char_lower in para.lower():
+            relevant.append(para.strip())
+    
+    return '\n'.join(relevant[:30])[:16384]
+

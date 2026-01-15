@@ -124,7 +124,9 @@ class BDH_GPU(nn.Module):
     Full BDH-GPU Language Model.
     
     Architecture:
-        1. Byte embedding: byte -> n-dimensional vector
+        1. Input embedding: 
+           - Byte mode: byte -> n-dimensional vector via nn.Embedding
+           - SBERT mode: sentence embeddings -> n-dimensional via nn.Linear
         2. L layers of BDH blocks
         3. Output projection: n-dimensional -> vocab logits
     
@@ -136,8 +138,12 @@ class BDH_GPU(nn.Module):
         super().__init__()
         self.config = config
         
-        # Token embedding (byte-level)
+        # Token embedding (byte-level) - kept for backward compatibility
         self.embed = nn.Embedding(config.vocab_size, config.n_neurons)
+        
+        # SBERT input projection (for SBERT mode)
+        # Projects SBERT dim (384) to model dim (n_neurons)
+        self.input_proj = nn.Linear(config.sbert_dim, config.n_neurons, bias=False)
         
         # BDH layers
         self.layers = nn.ModuleList([
@@ -164,7 +170,8 @@ class BDH_GPU(nn.Module):
     
     def forward(
         self,
-        input_ids: torch.Tensor,   # [batch, seq_len] - byte indices
+        input_ids: Optional[torch.Tensor] = None,   # [batch, seq_len] - byte indices
+        inputs_embeds: Optional[torch.Tensor] = None,  # [batch, seq_len, sbert_dim] - SBERT embeddings
         state: Optional[List[Dict[str, torch.Tensor]]] = None,
         offset: int = 0
     ) -> Tuple[torch.Tensor, List[Dict[str, torch.Tensor]]]:
@@ -172,22 +179,36 @@ class BDH_GPU(nn.Module):
         Forward pass.
         
         Args:
-            input_ids: Token IDs (bytes 0-255)
+            input_ids: Token IDs (bytes 0-255) - for byte-level mode
+            inputs_embeds: Pre-computed embeddings (SBERT) - for SBERT mode
+                          Provide either input_ids OR inputs_embeds, not both.
             state: List of layer states for streaming
             offset: Position offset for continuing generation
         
         Returns:
             (logits, new_states)
         """
-        batch, seq_len = input_ids.shape
+        # Validate inputs
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("Cannot provide both input_ids and inputs_embeds")
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("Must provide either input_ids or inputs_embeds")
+        
+        # Get embeddings based on input type
+        if inputs_embeds is not None:
+            # SBERT mode: project from sbert_dim to n_neurons
+            batch, seq_len, _ = inputs_embeds.shape
+            x = self.input_proj(inputs_embeds)  # [batch, seq, n_neurons]
+        else:
+            # Byte mode: use embedding lookup
+            batch, seq_len = input_ids.shape
+            x = self.embed(input_ids)  # [batch, seq, n_neurons]
+        
+        y = x.clone()  # Initial y = x (identity)
         
         # Initialize states
         if state is None:
             state = [None] * self.config.n_layers
-        
-        # Embed tokens
-        x = self.embed(input_ids)  # [batch, seq, n_neurons]
-        y = x.clone()  # Initial y = x (identity)
         
         # Pass through BDH layers
         new_states = []
@@ -331,13 +352,28 @@ class BDH_GPU(nn.Module):
         if state is None or len(state) == 0 or state[-1] is None:
             return None
         
-        # Use the last layer's sigma (now diagonal: [batch, n])
+        # Use the last layer's sigma
         sigma = state[-1].get("sigma")
         if sigma is None:
             return None
         
-        # sigma is already [batch, n] with diagonal state
-        return sigma
+        # Handle different sigma shapes from different attention types
+        if sigma.dim() == 2:
+            # Linear attention: sigma is [batch, n_neurons]
+            return sigma
+        elif sigma.dim() == 4:
+            # MultiHeadMatrixAttention: sigma is [batch, n_heads, head_dim, head_dim]
+            # Extract diagonal from each head's matrix and flatten
+            batch, n_heads, head_dim, _ = sigma.shape
+            
+            # Get diagonal of each head's matrix: [batch, n_heads, head_dim]
+            diagonals = torch.diagonal(sigma, dim1=-2, dim2=-1)
+            
+            # Flatten to [batch, n_heads * head_dim] = [batch, n_neurons]
+            return diagonals.reshape(batch, -1)
+        else:
+            # Unknown shape - try to flatten
+            return sigma.view(sigma.shape[0], -1)
 
 
 class BDHForConsistency(nn.Module):
