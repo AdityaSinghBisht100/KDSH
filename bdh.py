@@ -92,13 +92,12 @@ class LinearAttention(nn.Module):
                 # Note: This update isn't autograd-friendly for BPTT in this specific in-place form.
                 # But perfect for Inference.
                 if B == 1:
-                     # Recurrent Update
-                     # curr_state is B, nh, head_dim, D
-                     curr_state = (1 - erase) * (α_t * curr_state) + write * kv
-                     # Update the buffer (detached to prevent backprop through history if not desired)
-                     # For the dragon, we typically want persistence but for training consistency we update the buffer
-                     self.state.copy_(curr_state.detach().squeeze(0))
-                     state_for_attn = curr_state 
+                     # Recurrent Update: S_t = alpha * S_{t-1} + K^T V
+                     # Simple linear attention decay (gating is in TemporalLinearAttention)
+                     curr_state = self.alpha * curr_state + kv.squeeze(0)
+                     # Update the buffer (detached to prevent backprop through history)
+                     self.state[layer_idx] = curr_state.detach().clone()
+                     state_for_attn = curr_state.unsqueeze(0)
                 else:
                      # Fallback for batching without persistent state logic
                      # (Just behave like local attention or requires expanded state tensor)

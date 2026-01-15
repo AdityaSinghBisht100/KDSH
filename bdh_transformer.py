@@ -5,8 +5,16 @@ import math
 
 class BDHAttention(nn.Module):
     """
-    GPT-2 Style BDH Attention.
-    Implements Causal Linear Attention with State-Space persistence.
+    GPT-2 Style BDH Attention with Temporal Gating.
+    
+    Implements the report's g function:
+        S_t = (1 - E_t) ⊙ (α * S_{t-1}) + W_t ⊙ (K_t^T V_t)
+    
+    Where:
+        - E_t: Erase gate (what to forget)
+        - W_t: Write gate (how strongly to write new info)
+        - α: Learnable decay rate
+    
     Research Reference: 'Linear Transformers' (Katharopoulos et al.) 
     modified with BDH Bilinear Ingestion gates.
     """
@@ -22,8 +30,24 @@ class BDHAttention(nn.Module):
         self.out_proj = nn.Linear(config.n_embd, config.n_embd)
         
         # State-Space Kernel: [Heads, dk, dv]
-        # In BDH, we use the property S_t = S_{t-1} + k_t^T v_t
         self.register_buffer("state", torch.zeros(self.n_head, self.head_dim, self.head_dim))
+        
+        # === Temporal Gating (from report's g function) ===
+        # Learnable decay rate α (per-head)
+        self.alpha = nn.Parameter(torch.sigmoid(torch.randn(self.n_head, 1, 1)))
+        
+        # Erase gate: decides what to forget
+        # Input: K features [n_head, head_dim], Output: gate [n_head, head_dim]
+        self.erase_gate = nn.Sequential(
+            nn.Linear(self.head_dim, self.head_dim),
+            nn.Sigmoid()
+        )
+        
+        # Write gate: decides how strongly to write new facts
+        self.write_gate = nn.Sequential(
+            nn.Linear(self.head_dim, self.head_dim),
+            nn.Sigmoid()
+        )
         
     def reset_state(self):
         self.state.zero_()
@@ -41,8 +65,7 @@ class BDHAttention(nn.Module):
         k = F.elu(k) + 1
         
         if use_state and self.training:
-            # Parallel Scan for Speed (Causal)
-            # Memory efficient O(T) training
+            # Parallel Scan for Speed (Causal) with gating
             kv = k.unsqueeze(-1) * v.unsqueeze(-2) # [B, nh, T, dk, dv]
             s_seq = torch.cumsum(kv, dim=2) # [B, nh, T, dk, dv]
             
@@ -56,19 +79,35 @@ class BDHAttention(nn.Module):
                 self.state.copy_(s_seq[0, :, -1].detach())
                 
         elif use_state:
-            # Recurrent Mode (Inference/Ingestion)
+            # Recurrent Mode (Inference/Ingestion) WITH GATING
             out = []
-            curr_state = self.state
+            curr_state = self.state.clone()
+            
             for t in range(T):
                 q_t = q[:, :, t, :].unsqueeze(-2) # [B, nh, 1, dk]
-                k_t = k[:, :, t, :].unsqueeze(-1) # [B, nh, dk, 1]
+                k_t = k[:, :, t, :]  # [B, nh, dk]
                 v_t = v[:, :, t, :].unsqueeze(-2) # [B, nh, 1, dv]
                 
-                # S = S + k^T v
-                curr_state = curr_state + torch.matmul(k_t, v_t)
+                # Compute gates from K (key represents incoming info)
+                # k_t: [B, nh, dk] -> mean over batch -> [nh, dk]
+                k_mean = k_t.mean(dim=0)  # [nh, dk]
+                
+                # Erase gate: how much to forget [nh, dk, 1]
+                erase = self.erase_gate(k_mean).unsqueeze(-1)  # [nh, dk, 1]
+                
+                # Write gate: how strongly to write [nh, dk, 1]
+                write = self.write_gate(k_mean).unsqueeze(-1)  # [nh, dk, 1]
+                
+                # KV outer product
+                k_t_exp = k_t.unsqueeze(-1)  # [B, nh, dk, 1]
+                kv = torch.matmul(k_t_exp, v_t)  # [B, nh, dk, dv]
+                
+                # GATED UPDATE: S = (1-E) * (α * S) + W * KV
+                # This is the g function from the report!
+                curr_state = (1 - erase) * (self.alpha * curr_state) + write * kv.mean(dim=0)
                 
                 # y = q * S
-                y_t = torch.matmul(q_t, curr_state)
+                y_t = torch.matmul(q_t, curr_state.unsqueeze(0))
                 out.append(y_t.squeeze(-2))
             
             y = torch.stack(out, dim=2)

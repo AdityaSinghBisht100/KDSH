@@ -63,60 +63,74 @@ def train(system, epochs=20):
     print(f"Final F1-Score: {final_metrics['f1']:.4f}")
 
 def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
+    """
+    FIXED: Contrastive Training
+    
+    The goal is to train the model so that:
+    - CONSISTENT statements have HIGH log-probability (low surprise)
+    - CONTRADICTING statements have LOW log-probability (high surprise)
+    
+    We achieve this by:
+    - For consistent: minimize cross-entropy (maximize probability)
+    - For contradict: maximize cross-entropy (minimize probability) via gradient reversal
+    """
     system.bdh.train()
-    
-    # Optimizer is now passed in
-    
-    # Initialize consistency checker with BPE tokenizer
-    
-    # Initialize consistency checker with BPE tokenizer
-    checker = CounterfactualChecker(system.bdh, system.tokenizer, system.device)
     
     total_loss = 0
     num_samples = len(train_df)
-    pbar = tqdm(total=num_samples, desc="Energy Training", unit="sample", leave=False)
+    pbar = tqdm(total=num_samples, desc="Contrastive Training", unit="sample", leave=False)
     
     # Shuffle training data
-    # Robustness: ensure content/char/book are strings and NaN-safe
     train_df = train_df.fillna('').sample(frac=1).reset_index(drop=True)
     
-    # Process ONE sample at a time to avoid OOM (gradient accumulation uses too much memory)
     for idx, row in train_df.iterrows():
         book = str(row['book_name']).strip()
         char = str(row['char']).strip()
         content = str(row['content']).strip()
         label = str(row['label']).strip().lower()
         
-        if not content: continue # Skip empty content rows
+        if not content: continue
         is_contradict = (label == 'contradict')
         
         key = (book, char)
+        
+        # Load backstory state if available
         if key in system.backstory_states:
-            world_state = system.backstory_states[key]
+            backstory = system.backstory_states[key]
+            for layer_idx, block in enumerate(system.bdh.transformer.h):
+                if layer_idx < len(backstory):
+                    block.attn.state.copy_(backstory[layer_idx].to(system.device))
         else:
             system.bdh.reset_state()
-            world_state = system.bdh.get_state()
         
         optimizer.zero_grad()
-        
-        # In GPT-2 style training, we train on the context chunks
-        # to maximize the likelihood of the text.
-        # This makes the PMI check effective because the model will recognize "known" facts.
         
         tokens = torch.tensor([system.tokenizer.encode(content)], device=system.device)
         targets = tokens.clone()
         
-        logits, loss = system.bdh(tokens, targets=targets, use_state=True)
+        # Forward pass with backstory state
+        logits, ce_loss = system.bdh(tokens, targets=targets, use_state=True)
         
-        # Backward and step
+        # CONTRASTIVE OBJECTIVE:
+        # - Consistent: minimize CE (want high probability)
+        # - Contradict: maximize CE (want low probability given backstory)
+        
+        if is_contradict:
+            # For contradictions: we WANT high loss (low probability)
+            # Use negative gradient: minimize -loss = maximize loss
+            # Add margin to ensure the model learns to distinguish
+            loss = -ce_loss + 0.5  # Gradient reversal with margin
+        else:
+            # For consistent: minimize loss (want high probability)  
+            loss = ce_loss
+        
         loss.backward()
         torch.nn.utils.clip_grad_norm_(system.bdh.parameters(), max_norm=1.0)
         optimizer.step()
         
-        total_loss += loss.item()
+        total_loss += ce_loss.item()  # Track actual CE for monitoring
         
-        # Cleanup
-        del logits, loss
+        del logits, loss, ce_loss
         if idx % 10 == 0:
             torch.cuda.empty_cache()
             

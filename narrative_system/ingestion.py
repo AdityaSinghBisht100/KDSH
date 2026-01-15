@@ -33,8 +33,8 @@ def ingest_novel_knowledge(system, train_df, test_mode=True):
     
     system.bdh.eval()
     
-    # Get unique books
-    unique_books = train_df['book_name'].dropna().unique()
+    # Get unique books (Normalize first!)
+    unique_books = train_df['book_name'].dropna().apply(lambda x: str(x).strip()).unique()
     print(f"Found {len(unique_books)} unique books to ingest.")
     
     if test_mode:

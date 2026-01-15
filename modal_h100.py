@@ -47,15 +47,17 @@ def run_pipeline_on_h100():
     CACHE_FILE = os.path.join(MODEL_DIR, "world_state_h100.pt")
     CACHE_FILE_PHASE1 = os.path.join(MODEL_DIR, "world_state_cache.pt")
     
-    # Fix dimension mismatch (Multiplier 64)
-    if os.path.exists(CACHE_FILE):
-        print(f"⚠️ Deleting Stale Cache {CACHE_FILE} to fix dimension mismatch")
-        os.remove(CACHE_FILE)
-    if os.path.exists(CACHE_FILE_PHASE1):
-        print(f"⚠️ Deleting Stale Cache {CACHE_FILE_PHASE1} to fix dimension mismatch")
-        os.remove(CACHE_FILE_PHASE1)
+    # NOTE: Cache validation is now handled in ingestion.py
+    # Only delete cache if you need to force re-ingestion (e.g. architecture change)
+    FORCE_REINGEST = False  # Set to True only if architecture changed
     
-
+    if FORCE_REINGEST:
+        if os.path.exists(CACHE_FILE):
+            print(f"⚠️ Force deleting cache: {CACHE_FILE}")
+            os.remove(CACHE_FILE)
+        if os.path.exists(CACHE_FILE_PHASE1):
+            print(f"⚠️ Force deleting cache: {CACHE_FILE_PHASE1}")
+            os.remove(CACHE_FILE_PHASE1)
 
     OUTPUT_FILE = "/root/bdh/submission_h100.csv"
     

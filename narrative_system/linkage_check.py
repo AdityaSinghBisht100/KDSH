@@ -43,26 +43,43 @@ class NarrativeLinkageChecker:
     def check_linkage(self, statement, backstory_state=None):
         """
         Main decision function.
-        Returns: ("linked"|"unlinked", confidence_score)
-        """
-        # P(Statement | Backstory)
-        if backstory_state is not None:
-             # Load state into model before checking
-             for i, block in enumerate(self.model.transformer.h):
-                 if backstory_state[i].shape != block.attn.state.shape:
-                      continue # Skip incompatible states or handle error
-                 block.attn.state.copy_(backstory_state[i].to(self.device))
+        Returns: ("consistent"|"contradict", pmi_score)
         
+        Uses PMI: log P(statement|backstory) - log P(statement|empty)
+        - Positive PMI: backstory helps predict statement → consistent
+        - Negative PMI: backstory hurts prediction → contradict
+        """
+        # CRITICAL FIX: Save current state before any modifications
+        saved_state = [block.attn.state.clone() for block in self.model.transformer.h]
+        
+        # Step 1: Load backstory state for conditional computation
+        states_loaded = 0
+        if backstory_state is not None:
+            for i, block in enumerate(self.model.transformer.h):
+                if i < len(backstory_state) and backstory_state[i].shape == block.attn.state.shape:
+                    block.attn.state.copy_(backstory_state[i].to(self.device))
+                    states_loaded += 1
+            
+            if states_loaded == 0:
+                print("❌ No backstory states loaded due to shape mismatches!")
+        
+        # Step 2: Compute conditional log-likelihood P(statement | backstory)
         lp_conditional = self.compute_log_likelihood(statement, use_backstory=True)
         
-        # P(Statement | Empty)
+        # Step 3: Compute marginal log-likelihood P(statement | empty)
+        # Reset clears state, so we get baseline probability
         lp_marginal = self.compute_log_likelihood(statement, use_backstory=False)
+        
+        # Step 4: Restore original state (CRITICAL - was missing!)
+        for i, block in enumerate(self.model.transformer.h):
+            block.attn.state.copy_(saved_state[i])
         
         # PMI = Conditional - Marginal
         pmi = lp_conditional - lp_marginal
         
-        # Decision: If the backstory helps predict the statement (Higher PMI), it is linked.
-        # Threshold 0.0 means any improvement in probability counts.
+        # Decision logic:
+        # If backstory helps predict statement (higher probability) → consistent
+        # If backstory hurts prediction (lower probability) → contradict
         label = "consistent" if pmi > 0 else "contradict"
         
         return label, pmi
