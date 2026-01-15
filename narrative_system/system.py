@@ -117,7 +117,7 @@ class NarrativeConsistencySystem:
 
         # Better State Merging
         from .world_state import AdaptiveMerge
-        self.adaptive_merge = AdaptiveMerge(EMBEDDING_DIM, num_heads=4).to(self.device).eval()
+        self.adaptive_merge = AdaptiveMerge(EMBEDDING_DIM).to(self.device).eval()
 
         self.backstory_store = {}
         self.backstory_states = {} # Map (book, char) -> Tensor State
