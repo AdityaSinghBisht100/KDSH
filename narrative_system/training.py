@@ -40,16 +40,27 @@ def train(system, epochs=20):
     )
     
     for epoch in range(epochs):
-            loss = run_training_step(system, train_df, loss_fn, optimizer)
-            acc = evaluate_accuracy(system, test_df)
-            print(f"Epoch {epoch+1}/{epochs}: Loss={loss:.4f} Acc={acc:.2%}")
+            train_loss = run_training_step(system, train_df, loss_fn, optimizer)
+            metrics = evaluate_accuracy(system, test_df)
+            
+            print(f"\n--- Epoch {epoch+1}/{epochs} Summary ---")
+            print(f"Loss:      {train_loss:.4f}")
+            print(f"Accuracy:  {metrics['accuracy']:.2%}")
+            print(f"Precision: {metrics['precision']:.4f}")
+            print(f"Recall:    {metrics['recall']:.4f}")
+            print(f"F1-Score:  {metrics['f1']:.4f}")
+            print("Confusion Matrix:")
+            cm = metrics['confusion_matrix']
+            print(f"  [TN: {cm['tn']}, FP: {cm['fp']}]")
+            print(f"  [FN: {cm['fn']}, TP: {cm['tp']}]")
             
             # Save only BDH, as we have no classifier head
             torch.save(system.bdh.state_dict(), os.path.join(system.model_dir, "bdh_base.pt"))
             
     print("\n=== Training Complete ===")
-    final_acc = evaluate_accuracy(system, test_df)
-    print(f"Final Model Accuracy on Dataset: {final_acc:.2%}")
+    final_metrics = evaluate_accuracy(system, test_df)
+    print(f"Final Accuracy: {final_metrics['accuracy']:.2%}")
+    print(f"Final F1-Score: {final_metrics['f1']:.4f}")
 
 def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
     system.bdh.train()
@@ -116,24 +127,42 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
     return total_loss / num_samples
 
 def evaluate_accuracy(system, test_df):
-    correct = 0
-    total = 0
+    results = []
+    labels = []
+    
     system.bdh.eval()
     
-    # Use inference logic
     with torch.no_grad():
         for _, row in test_df.iterrows():
             book = row['book_name']
             char = row['char']
             content = row['content']
-            label = row['label'].strip().lower()
+            label = str(row['label']).strip().lower()
             
-            # predict_single uses CounterfactualChecker internally
             score, _ = system.predict_single(book, char, content)
             
             pred = "consistent" if score > 0.5 else "contradict"
-            if pred == label:
-                correct += 1
-            total += 1
+            results.append(pred)
+            labels.append(label)
             
-    return correct / total if total > 0 else 0
+    # Binary Classification Metrics (Positive = contradict)
+    tp = tn = fp = fn = 0
+    for p, l in zip(results, labels):
+        if p == "contradict" and l == "contradict": tp += 1
+        elif p == "consistent" and l == "consistent": tn += 1
+        elif p == "contradict" and l == "consistent": fp += 1
+        elif p == "consistent" and l == "contradict": fn += 1
+
+    total = len(labels)
+    acc = (tp + tn) / total if total > 0 else 0
+    prec = tp / (tp + fp) if (tp + fp) > 0 else 0
+    rec = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * (prec * rec) / (prec + rec) if (prec + rec) > 0 else 0
+    
+    return {
+        "accuracy": acc,
+        "precision": prec,
+        "recall": rec,
+        "f1": f1,
+        "confusion_matrix": {"tp": tp, "tn": tn, "fp": fp, "fn": fn}
+    }

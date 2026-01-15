@@ -132,25 +132,25 @@ class EntityExtractor:
         return 'unknown'
 
 
-class ByteTokenizer:
-    """Convert text to byte-level tokens compatible with BDH."""
+class BPETokenizer:
+    """Convert text to BPE tokens compatible with BDH and pretrained decoders."""
+    def __init__(self):
+        import tiktoken
+        self.enc = tiktoken.get_encoding("cl100k_base")
     
-    @staticmethod
-    def encode(text: str) -> List[int]:
-        """Encode text to byte tokens."""
-        return list(bytearray(text, 'utf-8'))
+    def encode(self, text: str) -> List[int]:
+        """Encode text to BPE tokens."""
+        return self.enc.encode(text)
     
-    @staticmethod
-    def decode(tokens: List[int]) -> str:
-        """Decode byte tokens to text."""
-        return bytes(tokens).decode('utf-8', errors='ignore')
+    def decode(self, tokens: List[int]) -> str:
+        """Decode BPE tokens to text."""
+        return self.enc.decode(tokens)
     
-    @staticmethod
-    def encode_batch(texts: List[str], max_length: int = 512) -> torch.Tensor:
+    def encode_batch(self, texts: List[str], max_length: int = 512) -> torch.Tensor:
         """Encode batch of texts with padding."""
         encoded = []
         for text in texts:
-            tokens = ByteTokenizer.encode(text)
+            tokens = self.encode(text)
             # Truncate or pad
             if len(tokens) > max_length:
                 tokens = tokens[:max_length]
@@ -167,7 +167,7 @@ class NarrativeDocumentBuilder:
     def __init__(self):
         self.sentence_tokenizer = SentenceTokenizer()
         self.entity_extractor = EntityExtractor()
-        self.byte_tokenizer = ByteTokenizer()
+        self.tokenizer = BPETokenizer()
     
     def build(self, text: str) -> NarrativeDocument:
         """Build narrative document from text."""
@@ -204,7 +204,7 @@ class NarrativeDocumentBuilder:
             sentence = Sentence(
                 text=sent_text,
                 index=idx,
-                tokens=self.byte_tokenizer.encode(sent_text),
+                tokens=self.tokenizer.encode(sent_text),
                 entities=sent_entities,
                 temporal_marker=temporal_marker
             )

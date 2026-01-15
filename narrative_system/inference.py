@@ -20,7 +20,7 @@ def predict_single(system, book_name, char_name, content):
             else:
                 book_path = os.path.join(system.data_dir, f"{book_name}.txt")
                 if not os.path.exists(book_path):
-                    return 0.5, "Unknown book - Neutral confidence"
+                    return 0.5, "Unknown context"
                 
                 with open(book_path, 'r', encoding='utf-8') as f:
                     text = f.read()
@@ -37,75 +37,13 @@ def predict_single(system, book_name, char_name, content):
     # Map to score for compatibility
     if prediction == "consistent":
         score = 0.9
-        # rationale_prefix = "Consistent."
+        rationale = f"Statistically consistent with {char_name}'s history."
     else:
         score = 0.1
-        # rationale_prefix = "Inconsistent."
+        rationale = f"Detected high variance clash with {char_name}'s state history."
         
-    # Rationale Generation - "Bluff" Mode (Authoritative LLM Mimicry)
-    if score > 0.5:
-        # CONSISTENT
-        templates = [
-            f"Aligned with established narrative flow for {char_name}.",
-            f"Consistent. Fits within the known behavioral patterns of {char_name}.",
-            "Plausible. No direct contradictions found in the current world state."
-        ]
-        import random
-        rationale = random.choice(templates)
-        
-        # Try to find supporting evidence to make it sound even better
-        try:
-            if book_name in system.world_states and hasattr(system.world_states[book_name], 'entity_memories'):
-                    memories = system.world_states[book_name].entity_memories.get(char_name, [])
-                    if memories:
-                        mem_vecs = torch.stack([m[0] for m in memories]).to(system.device)
-                        system.bdh.reset_state()
-                        stmt_tokens = torch.tensor([[ord(c) % 256 for c in content]], dtype=torch.long, device=system.device)
-                        e_seq = system.bdh(stmt_tokens, use_state=False, return_embeddings=True)
-                        stmt_vec = e_seq.mean(dim=1)
-                        sims = torch.nn.functional.cosine_similarity(stmt_vec, mem_vecs)
-                        best_idx = torch.argmax(sims).item()
-                        if sims[best_idx].item() > 0.35:
-                            evidence = memories[best_idx][1]
-                            rationale = f"Verified. Supports known events: \"{evidence}\""
-        except: pass
-
-    else:
-        # CONTRADICTION - The "Bluff"
-        rationale = f"Inconsistent. This conflicts with the established timeline for {char_name}."
-        
-        # Retrieval Logic for "Real" Evidence
-        try:
-            if book_name in system.world_states:
-                ws = system.world_states[book_name]
-                if hasattr(ws, 'entity_memories') and char_name in ws.entity_memories:
-                        memories = ws.entity_memories[char_name]
-                        if memories:
-                            # Compute cosine similarity
-                            mem_vecs = torch.stack([m[0] for m in memories]).to(system.device) # [N, D]
-                            
-                            # Re-encode statement cleanly (detached)
-                            system.bdh.reset_state()
-                            stmt_tokens = torch.tensor([[ord(c) % 256 for c in content]], dtype=torch.long, device=system.device)
-                            e_seq = system.bdh(stmt_tokens, use_state=False, return_embeddings=True)
-                            stmt_vec = e_seq.mean(dim=1) # [1, D]
-                            
-                            sims = torch.nn.functional.cosine_similarity(stmt_vec, mem_vecs)
-                            best_idx = torch.argmax(sims).item()
-                            best_score = sims[best_idx].item()
-                            
-                            evidence_text = memories[best_idx][1]
-                            
-                            # Bluff Logic: Even if score is low-ish, frame it as a contradiction
-                            # We pick the "closest" memory to say "This contradicts X"
-                            if best_score > 0.3: # Lower threshold to catch more
-                                rationale = f"Impossible. World state records indicate that {evidence_text}, which directly refutes the claim."
-                            elif best_score > 0.2:
-                                rationale = f"Unlikely. Context suggests {evidence_text}, casting doubt on this statement."
-        except Exception as e:
-            print(f"Retrieval failed: {e}")
-
     return score, rationale
+
 
 def generate_predictions(system, input_file="test.csv", output_file="predictions.csv"):
     """Run batch inference on a CSV and save binary predictions with rationale."""

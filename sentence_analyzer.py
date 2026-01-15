@@ -258,6 +258,10 @@ class SentenceAnalyzer(nn.Module):
         self.d_model = d_model
         self.device = device
         
+        # Initialize internal tokenizer for legacy support
+        import tiktoken
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        
         # Coherence scorer - move to device
         self.coherence_scorer = CoherenceScorer(d_model, device).to(device)
         
