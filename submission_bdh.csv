@@ -1,0 +1,62 @@
+id,prediction,rationale
+95,0,Perplexity: 136.87. High (surprising).
+136,1,Perplexity: 100.95. Low (expected).
+59,1,Perplexity: 97.19. Low (expected).
+60,0,Perplexity: 125.43. High (surprising).
+124,1,Perplexity: 51.77. Low (expected).
+111,1,Perplexity: 80.97. Low (expected).
+135,0,Perplexity: 119.38. High (surprising).
+27,1,No backstory found
+110,1,Perplexity: 93.90. Low (expected).
+42,1,No backstory found
+56,1,Perplexity: 94.35. Low (expected).
+80,0,Perplexity: 170.69. High (surprising).
+28,1,No backstory found
+101,1,Perplexity: 84.76. Low (expected).
+91,0,Perplexity: 123.72. High (surprising).
+24,1,Perplexity: 108.94. Low (expected).
+119,0,Perplexity: 111.60. High (surprising).
+93,0,Perplexity: 128.00. High (surprising).
+72,1,Perplexity: 93.13. Low (expected).
+16,1,Perplexity: 100.12. Low (expected).
+30,1,No backstory found
+97,0,Perplexity: 130.37. High (surprising).
+22,0,Perplexity: 160.93. High (surprising).
+53,0,Perplexity: 119.23. High (surprising).
+58,1,Perplexity: 96.12. Low (expected).
+81,0,Perplexity: 150.67. High (surprising).
+47,1,Perplexity: 98.09. Low (expected).
+7,0,Perplexity: 125.80. High (surprising).
+121,0,Perplexity: 116.84. High (surprising).
+129,1,Perplexity: 90.69. Low (expected).
+51,1,Perplexity: 106.66. Low (expected).
+127,1,Perplexity: 105.63. Low (expected).
+133,1,Perplexity: 88.87. Low (expected).
+52,1,Perplexity: 91.28. Low (expected).
+114,0,Perplexity: 111.29. High (surprising).
+2,0,Perplexity: 135.13. High (surprising).
+33,1,No backstory found
+15,1,Perplexity: 106.98. Low (expected).
+82,0,Perplexity: 163.47. High (surprising).
+37,1,No backstory found
+3,1,Perplexity: 81.59. Low (expected).
+103,1,Perplexity: 96.90. Low (expected).
+94,1,Perplexity: 108.60. Low (expected).
+85,1,Perplexity: 83.65. Low (expected).
+21,0,Perplexity: 127.81. High (surprising).
+49,1,Perplexity: 77.36. Low (expected).
+140,1,Perplexity: 75.74. Low (expected).
+64,1,Perplexity: 105.27. Low (expected).
+131,1,Perplexity: 91.19. Low (expected).
+61,1,Perplexity: 88.61. Low (expected).
+86,0,Perplexity: 118.26. High (surprising).
+38,1,No backstory found
+132,1,Perplexity: 104.10. Low (expected).
+77,0,Perplexity: 122.53. High (surprising).
+70,0,Perplexity: 178.27. High (surprising).
+115,1,Perplexity: 108.32. Low (expected).
+78,0,Perplexity: 167.02. High (surprising).
+87,0,Perplexity: 149.82. High (surprising).
+75,0,Perplexity: 136.34. High (surprising).
+44,1,No backstory found
+1000,0,Perplexity: 473.09. High (surprising).

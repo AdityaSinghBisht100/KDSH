@@ -1,26 +1,64 @@
 """
 BDH Configuration
+
+Based on "The Dragon Hatchling" paper (arXiv:2509.26507v1)
+Table 2: Model sizes and hyperparameters
 """
 from dataclasses import dataclass
+import torch
 
 @dataclass
 class BDHConfig:
-    # Embedding settings
-    embedding_model: str = "all-MiniLM-L6-v2"  # Sentence-Transformer model
-    embedding_dim: int = 384  # Dimension of embeddings
+    """
+    Configuration for BDH-GPU model.
     
-    # State-Space settings
-    state_dim: int = 384  # Match embedding dim
-    n_heads: int = 4
-    decay_alpha: float = 0.95  # State decay rate
+    Default: ~25M parameters (smallest practical size)
+    - n = 32768 (number of neurons/particles)
+    - d = 256 (embedding dimension per neuron)
+    - L = 4 (number of layers)
+    """
+    # Model architecture
+    n_neurons: int = 32768      # Number of neurons (n in paper)
+    embed_dim: int = 256        # Embedding dimension per neuron (d in paper)
+    n_layers: int = 4           # Number of BDH layers (L in paper)
     
-    # Memory settings
-    chunk_size: int = 512  # Characters per chunk for ingestion
-    max_entities: int = 100
+    # Vocabulary (byte-level, no tokenizer needed)
+    vocab_size: int = 256       # UTF-8 bytes
     
-    # Training settings
-    learning_rate: float = 1e-4
-    consistency_threshold: float = 0.5
+    # RoPE parameters
+    rope_base: float = 10000.0
+    
+    # Decay factor for linear attention (U matrix eigenvalues)
+    decay_rate: float = 0.99    # Controls how fast old info decays
+    
+    # Training
+    max_seq_len: int = 8192     # Maximum sequence length per batch
     
     # Device
-    device: str = "cuda"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype: torch.dtype = torch.float32
+    
+    @property
+    def head_dim(self) -> int:
+        """Dimension per attention head."""
+        return self.embed_dim
+    
+    @property
+    def n_params(self) -> int:
+        """Approximate parameter count."""
+        # Embedding: vocab_size * n_neurons
+        # Per layer: ~4 * n_neurons * embed_dim (for E, Dx, Dy matrices)
+        # Output: n_neurons * vocab_size
+        emb = self.vocab_size * self.n_neurons
+        layers = self.n_layers * 4 * self.n_neurons * self.embed_dim
+        out = self.n_neurons * self.vocab_size
+        return emb + layers + out
+
+
+# Preset configurations matching Table 2 in the paper
+CONFIGS = {
+    "micro": BDHConfig(n_neurons=512, embed_dim=64, n_layers=2),       # ~1M params (fits in memory)
+    "tiny": BDHConfig(n_neurons=1024, embed_dim=128, n_layers=2),      # ~3M params
+    "small": BDHConfig(n_neurons=2048, embed_dim=256, n_layers=4),     # ~12M params
+    "medium": BDHConfig(n_neurons=4096, embed_dim=384, n_layers=6),    # ~50M params
+}
