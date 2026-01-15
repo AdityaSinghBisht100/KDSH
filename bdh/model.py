@@ -241,7 +241,7 @@ class BDH_GPU(nn.Module):
         batch_size, seq_len = input_ids.shape
         
         # Forward pass
-        logits, new_state = self.forward(input_ids, state)
+        logits, new_state = self.forward(input_ids=input_ids, state=state)
         
         # Shift for next-token prediction
         logits_shift = logits[:, :-1, :].contiguous()
