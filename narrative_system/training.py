@@ -31,7 +31,7 @@ def train(system, epochs=20):
     
     # Initialize implementation of Energy Loss
     # Margin 0.3 means we want Gap > 0.3
-    loss_fn = ContrastiveEnergyLoss(margin=0.5).to(system.device)
+    loss_fn = ContrastiveEnergyLoss(margin=0.1).to(system.device)
     
     # Initialize Optimizer ONCE to preserve momentum across epochs
     optimizer = torch.optim.Adam(
@@ -57,8 +57,6 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
     # Optimizer is now passed in
     
     # Initialize consistency checker with BPE tokenizer
-    
-    # Initialize consistency checker with BPE tokenizer
     checker = CounterfactualChecker(system.bdh, system.tokenizer, system.device)
     
     total_loss = 0
@@ -67,6 +65,10 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
     
     # Shuffle training data
     train_df = train_df.sample(frac=1).reset_index(drop=True)
+    
+    # Gradient Accumulation Steps
+    accumulation_steps = 4
+    optimizer.zero_grad()
     
     # Process ONE sample at a time to avoid OOM (gradient accumulation uses too much memory)
     for idx, row in train_df.iterrows():
@@ -83,8 +85,6 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
             system.bdh.reset_state()
             world_state = system.bdh.get_state()
         
-        optimizer.zero_grad()
-        
         # 1. Compute Surprise(Statement) with gradient
         pos_surprise = checker.compute_surprise(content, world_state, training=True)
         
@@ -95,14 +95,21 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
         # 3. Compute Energy Loss
         loss = loss_fn(pos_surprise, neg_surprise, is_contradict)
         
-        # Backward and step per sample to free memory immediately
+        # Normalize loss for accumulation
+        loss = loss / accumulation_steps
+        
+        # Backward 
         loss.backward()
         
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(system.bdh.parameters(), max_norm=1.0)
+        total_loss += loss.item() * accumulation_steps # Track actual loss
         
-        optimizer.step()
-        total_loss += loss.item()
+        # Step every accumulation_steps or at end
+        if (idx + 1) % accumulation_steps == 0 or (idx + 1) == num_samples:
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(system.bdh.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            optimizer.zero_grad()
         
         # Free memory aggressively
         del pos_surprise, neg_surprise, loss

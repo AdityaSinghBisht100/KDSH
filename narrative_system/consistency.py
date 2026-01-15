@@ -169,15 +169,18 @@ class CounterfactualChecker:
         delta = delta * temporal_decay
         
         # Stabilize via log1p (prevents explosion)
+        # Normalization for Length Bias (Negation is usually longer)
+        seq_len = tokens.size(1)
+        if seq_len > 0:
+             delta = delta / seq_len
+             
+        # Stabilize via log1p (prevents explosion)
         if training:
              surprise = torch.log1p(delta)
         else:
              surprise = math.log1p(delta)
-        
-        # Clamp for additional safety
-        if not training:
              surprise = min(surprise, math.log1p(SURPRISE_MAX))
-        
+             
         return surprise
     
     def predict(self, statement: str, world_state: torch.Tensor) -> Tuple[str, float]:
