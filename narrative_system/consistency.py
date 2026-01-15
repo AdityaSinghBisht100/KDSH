@@ -95,7 +95,10 @@ class CounterfactualChecker:
         """
         Generate negated variant of statement.
         """
-        statement = statement.strip()
+        # Robustness fix: Ensure statement is a string and handle NaN/Empty
+        statement = str(statement).strip()
+        if not statement or statement == 'nan':
+            return "Nothing happened."
         
         # 1. Try to REMOVE negation first (Double Negation Logic)
         for pattern, replacement in self.negation_removals:

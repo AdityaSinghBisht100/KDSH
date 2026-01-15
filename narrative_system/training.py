@@ -77,14 +77,17 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
     pbar = tqdm(total=num_samples, desc="Energy Training", unit="sample", leave=False)
     
     # Shuffle training data
-    train_df = train_df.sample(frac=1).reset_index(drop=True)
+    # Robustness: ensure content/char/book are strings and NaN-safe
+    train_df = train_df.fillna('').sample(frac=1).reset_index(drop=True)
     
     # Process ONE sample at a time to avoid OOM (gradient accumulation uses too much memory)
     for idx, row in train_df.iterrows():
-        book = row['book_name'].strip()
-        char = row['char'].strip()
-        content = row['content']
-        label = row['label'].strip().lower()
+        book = str(row['book_name']).strip()
+        char = str(row['char']).strip()
+        content = str(row['content']).strip()
+        label = str(row['label']).strip().lower()
+        
+        if not content: continue # Skip empty content rows
         is_contradict = (label == 'contradict')
         
         key = (book, char)
@@ -132,12 +135,17 @@ def evaluate_accuracy(system, test_df):
     
     system.bdh.eval()
     
+    # Robustness: fill NaNs
+    test_df = test_df.fillna('')
+    
     with torch.no_grad():
         for _, row in test_df.iterrows():
-            book = row['book_name']
-            char = row['char']
-            content = row['content']
+            book = str(row['book_name']).strip()
+            char = str(row['char']).strip()
+            content = str(row['content']).strip()
             label = str(row['label']).strip().lower()
+            
+            if not content: continue # Skip malformed rows
             
             score, _ = system.predict_single(book, char, content)
             
