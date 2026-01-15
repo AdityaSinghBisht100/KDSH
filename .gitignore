@@ -39,7 +39,7 @@ env/
 *.pth
 *.ckpt
 checkpoints/
-models/
+#models/
 *.onnx
 *.bin
 
