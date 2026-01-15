@@ -70,56 +70,69 @@ class CounterfactualChecker:
         self.tokenizer = tokenizer
         self.device = device
         
-        # Enhanced Negation patterns (Ordered by specificity)
-        # Group 1: Remove existing negation (Toggle)
-        self.negation_removals = [
-            (r"\b(is|was|are|were|has|have|had|did|do|does|can|could|should|would|will|must|might) not\b", r"\1"),
-            (r"\b(isn|wasn|aren|weren|hasn|haven|hadn|didn|don|doesn|couldn|shouldn|wouldn|mustn)[\u2019']t\b", r"\1"),
-            (r"\bcan[\u2019']t\b", "can"),
-            (r"\bwon[\u2019']t\b", "will"),
-            (r"\bnever\b", "always"),
-            (r"\bno\b", "some"), # aggressive but often valid
-        ]
-
-        # Group 2: Add negation to positive verbs
-        self.negation_additions = [
-            (r"\b(is|was|are|were|has|have|had|did|do|does|can|could|should|would|will|must|might)\b", r"\1 not"),
-            (r"\b(Is|Was|Are|Were|Has|Have|Had|Did|Do|Does|Can|Could|Should|Would|Will|Must|Might)\b", r"\1 not"), # Capitalized start
-        ]
-
-        # Group 3: Morphological handling (simple heuristics for past tense)
-        # "He walked" -> "He did not walk" is hard without lemmas.
-        # We stick to the robust fallback for complex verbs.
-
-    def negate(self, statement: str) -> str:
-        """
-        Generate negated variant of statement.
-        """
-        # Robustness fix: Ensure statement is a string and handle NaN/Empty
-        statement = str(statement).strip()
-        if not statement or statement == 'nan':
-            return "Nothing happened."
-        
-        # 1. Try to REMOVE negation first (Double Negation Logic)
-        for pattern, replacement in self.negation_removals:
-            if re.search(pattern, statement, re.IGNORECASE):
-                return re.sub(pattern, replacement, statement, count=1, flags=re.IGNORECASE)
-        
-        # 2. Try to ADD negation to auxiliary verbs
-        for pattern, replacement in self.negation_additions:
-            # We use search to find the *first* verb match to negate main clause
-            if re.search(pattern, statement): # Case sensitive for the 'Capitalized' check logic
-                return re.sub(pattern, replacement, statement, count=1)
-        
-        # 3. Fallback: Distinctive Prefix
-        # "It is false that" acts as a strong logical operator
-        return f"It is false that {statement}"
-    
     def encode_text(self, text: str) -> torch.Tensor:
-        """Convert text to BPE tokens."""
-        ids = self.tokenizer.encode(text)
-        tokens = torch.tensor([ids], dtype=torch.long, device=self.device)
-        return tokens
+        """Convert text to BPE tokens using tiktoken."""
+        # Standardize: always use tiktoken.
+        ids = self.tokenizer.encode(str(text))
+        return torch.tensor([ids], dtype=torch.long, device=self.device)
+    
+    def compute_energy(self, text: str, world_state: torch.Tensor) -> torch.Tensor:
+        """
+        Calculates the Average Per-Token Cross Entropy (Energy) 
+        of the text given a specific world state.
+        
+        This uses the 'Actual BDH Thinking'—the model's internal probability.
+        """
+        # Load state
+        self.bdh.reset_state()
+        if world_state is not None:
+             self.bdh.set_state(world_state.detach().clone().to(self.device))
+        
+        # Prepare inputs
+        tokens = self.encode_text(text)
+        if tokens.size(1) < 2:
+             return torch.tensor(10.0, device=self.device) # High energy for tiny/malformed text
+             
+        # Targets are just shifted tokens
+        targets = tokens.clone()
+        
+        # Shift inputs/targets for auto-regressive loss
+        # input: [B, T-1], target: [B, T-1] (shifted by 1)
+        inputs = tokens[:, :-1]
+        targets = targets[:, 1:]
+        
+        # Forward Pass
+        # We use use_state=True to ensure the world state matrix is involved in the calculation
+        logits, loss = self.bdh(inputs, targets=targets, use_state=True)
+        
+        # Loss is already averaged over T by F.cross_entropy in bdh.py
+        return loss
+
+    def predict(self, statement: str, world_state: torch.Tensor) -> Tuple[str, float]:
+        """
+        Uses Differential Energy to determine consistency.
+        
+        Differential Energy = E(S | World) - E(S | Reset)
+        
+        - Negative Delta: World State REDUCED the surprise of the statement. (Consistent)
+        - Positive Delta: World State INCREASED the surprise. (Contradict)
+        """
+        # 1. Compute Energy with the narrative context
+        energy_context = self.compute_energy(statement, world_state)
+        
+        # 2. Compute Energy without any context (reset state)
+        energy_base = self.compute_energy(statement, None)
+        
+        # 3. Decision Logic
+        # We use a small buffer (0.01) to avoid noise-driven contradictions
+        delta = (energy_context - energy_base).item()
+        
+        if delta > 0.01:
+            # The world state was confused by this statement
+            return "contradict", 1.0 + abs(delta)
+        else:
+            # The world state explained this statement
+            return "consistent", 1.0 + abs(delta)
     
     def compute_surprise(self, text: str, world_state: torch.Tensor, 
                           fact_time: float = 0.0, query_time: float = 1.0,
@@ -183,54 +196,20 @@ class CounterfactualChecker:
         
         return surprise
     
-    def predict(self, statement: str, world_state: torch.Tensor) -> Tuple[str, float]:
-        """
-        Counterfactual consistency prediction.
-        
-        Returns:
-            (prediction, confidence)
-            prediction: "consistent" or "contradict"
-            confidence: ratio indicating strength of prediction
-        """
-        # Generate negation
-        negated = self.negate(statement)
-        
-        # Compute surprise for both
-        surprise_S = self.compute_surprise(statement, world_state)
-        surprise_negS = self.compute_surprise(negated, world_state)
-        
-        # Avoid division by zero
-        epsilon = 1e-8
-        conflict_ratio = surprise_S / (surprise_negS + epsilon)
-        
-        # Decision logic
-        if conflict_ratio > 1.0:
-            # Statement caused MORE surprise than its negation
-            # → World state conflicts with statement
-            return "contradict", conflict_ratio
-        else:
-            # Negation caused MORE surprise
-            # → World state aligns with statement  
-            return "consistent", 1.0 / (conflict_ratio + epsilon)
-    
     def predict_with_details(self, statement: str, world_state: torch.Tensor) -> Dict:
         """
-        Detailed prediction with debug info.
+        Detailed prediction with Energy Deltas.
         """
-        negated = self.negate(statement)
-        surprise_S = self.compute_surprise(statement, world_state)
-        surprise_negS = self.compute_surprise(negated, world_state)
+        energy_context = self.compute_energy(statement, world_state).item()
+        energy_base = self.compute_energy(statement, None).item()
+        delta = energy_context - energy_base
         
-        epsilon = 1e-8
-        conflict_ratio = surprise_S / (surprise_negS + epsilon)
-        
-        prediction = "contradict" if conflict_ratio > 1.0 else "consistent"
+        prediction = "contradict" if delta > 0.01 else "consistent"
         
         return {
             "statement": statement,
-            "negated": negated,
-            "surprise_statement": surprise_S,
-            "surprise_negation": surprise_negS,
-            "conflict_ratio": conflict_ratio,
+            "energy_with_context": energy_context,
+            "energy_without_context": energy_base,
+            "energy_delta": delta,
             "prediction": prediction
         }

@@ -99,15 +99,25 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
         
         optimizer.zero_grad()
         
-        # 1. Compute Surprise(Statement) with gradient
-        pos_surprise = checker.compute_surprise(content, world_state, training=True)
+        # 1. Compute Energy with context
+        energy_context = checker.compute_energy(content, world_state)
         
-        # 2. Compute Surprise(Negation) with gradient
-        negated = checker.negate(content)
-        neg_surprise = checker.compute_surprise(negated, world_state, training=True)
+        # 2. Compute Energy WITHOUT context (Reset State)
+        energy_base = checker.compute_energy(content, None)
         
-        # 3. Compute Energy Loss
-        loss = loss_fn(pos_surprise, neg_surprise, is_contradict)
+        # 3. Compute Differential Energy Loss
+        # We want: 
+        # - Consistent: context_energy < base_energy (Negative Delta)
+        # - Contradict: context_energy > base_energy (Positive Delta)
+        
+        if is_contradict:
+            # PUSH: make context energy MUCH LARGER than base energy
+            # Loss = clamp(margin + base - context, min=0)
+            loss = torch.clamp(0.1 + energy_base - energy_context, min=0)
+        else:
+            # PULL: make context energy MUCH SMALLER than base energy
+            # Loss = clamp(margin + context - base, min=0)
+            loss = torch.clamp(0.1 + energy_context - energy_base, min=0)
         
         # Backward and step per sample to free memory immediately
         loss.backward()
@@ -119,7 +129,7 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
         total_loss += loss.item()
         
         # Free memory aggressively
-        del pos_surprise, neg_surprise, loss
+        del energy_context, energy_base, loss
         if idx % 10 == 0:
             torch.cuda.empty_cache()
             

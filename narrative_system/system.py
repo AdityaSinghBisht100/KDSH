@@ -115,6 +115,10 @@ class NarrativeConsistencySystem:
         from sentence_analyzer import SentenceAnalyzer
         self.sentence_analyzer = SentenceAnalyzer(self.bdh, EMBEDDING_DIM, self.device)
 
+        # Better State Merging
+        from .world_state import AdaptiveMerge
+        self.adaptive_merge = AdaptiveMerge(EMBEDDING_DIM, num_heads=4).to(self.device).eval()
+
         self.backstory_store = {}
         self.backstory_states = {} # Map (book, char) -> Tensor State
         print("--> Initialization complete")
@@ -193,7 +197,9 @@ class NarrativeConsistencySystem:
         with torch.no_grad():
             for i in range(0, len(text_stream), chunk_size):
                 chunk = text_stream[i : i+chunk_size]
-                tokens = torch.tensor([[ord(c) % 256 for c in chunk]], dtype=torch.long, device=self.device)
+                # BPE Fix
+                ids = self.tokenizer.encode(chunk)
+                tokens = torch.tensor([ids], dtype=torch.long, device=self.device)
                 if tokens.size(1) == 0: continue
                 
                 # Forward Pass with State Update
