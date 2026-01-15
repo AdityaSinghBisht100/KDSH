@@ -27,7 +27,7 @@ from typing import Optional, Dict, List, Tuple
 import math
 
 from .config import BDHConfig
-from .layers import RoPE, BDHLayerNorm, PositiveSparse, LinearAttention
+from .layers import RoPE, BDHLayerNorm, PositiveSparse, LinearAttention, MultiHeadMatrixAttention
 
 
 class BDHBlock(nn.Module):
@@ -58,8 +58,8 @@ class BDHBlock(nn.Module):
         # Positive sparse activation
         self.positive = PositiveSparse()
         
-        # Linear attention
-        self.attention = LinearAttention(n, decay_rate=config.decay_rate)
+        # Multi-Head Matrix Attention (Better Entity Tracking)
+        self.attention = MultiHeadMatrixAttention(n, n_heads=config.n_heads, decay_rate=config.decay_rate)
         
         # RoPE for position encoding
         self.rope = RoPE(n, base=config.rope_base, max_seq_len=config.max_seq_len)

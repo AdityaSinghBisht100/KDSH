@@ -47,13 +47,13 @@ def run_pipeline():
     os.chdir("/root/bdh_workspace")
     
     from bdh import BDH_GPU, BDHConfig, CONFIGS
-    from pipeline import pretrain_on_novels, train_consistency_classifier, generate_predictions
+    from pipeline import pretrain_on_novels, train_consistency_classifier, generate_predictions, contrastive_finetune
     
     print(f"🐉 BDH Dragon Hatchling Pipeline")
     print(f"🚀 Running on {torch.cuda.get_device_name(0)}")
     
-    # Configuration - use "tiny" for balance of speed and quality
-    config = CONFIGS["tiny"]  # ~3M params, efficient with parallel attention
+    # Configuration - use "small" for better capacity
+    config = CONFIGS["small"]  # ~12M params, more capacity for learning
     config.device = "cuda"
     
     DATA_DIR = "./files"
@@ -69,8 +69,8 @@ def run_pipeline():
     print(f"📊 Train: {len(train_df)}, Test: {len(test_df)}")
     
     # Check for cached model
-    pretrain_path = os.path.join(MODEL_DIR, "bdh_pretrained.pt")
-    classifier_path = os.path.join(MODEL_DIR, "bdh_classifier.pt")
+    pretrain_path = os.path.join(MODEL_DIR, "bdh_pretrained_small.pt")
+    contrastive_path = os.path.join(MODEL_DIR, "bdh_contrastive_small.pt")
     
     # Initialize model
     model = BDH_GPU(config)
@@ -85,7 +85,7 @@ def run_pipeline():
         model = pretrain_on_novels(
             model,
             novel_paths,
-            epochs=2,  # Fewer epochs for demo
+            epochs=2,
             batch_size=2,
             lr=1e-4,
             device="cuda",
@@ -93,30 +93,22 @@ def run_pipeline():
         )
         model_volume.commit()
     
-    # Phase 2: Train classifier
-    if os.path.exists(classifier_path):
-        print(f"📦 Loading classifier from {classifier_path}")
-        checkpoint = torch.load(classifier_path, map_location="cuda")
-        model.load_state_dict(checkpoint['model'])
-        
-        import torch.nn as nn
-        classifier = nn.Sequential(
-            nn.Linear(2, 32),
-            nn.ReLU(),
-            nn.Linear(32, 2)
-        ).cuda()
-        classifier.load_state_dict(checkpoint['classifier'])
+    # Phase 2: Contrastive fine-tuning (skip old classifier)
+    if os.path.exists(contrastive_path):
+        print(f"📦 Loading contrastive-finetuned model from {contrastive_path}")
+        model.load_state_dict(torch.load(contrastive_path, map_location="cuda"))
     else:
-        print("🏋️ Training consistency classifier...")
-        model, classifier = train_consistency_classifier(
+        print("🏋️ Contrastive fine-tuning...")
+        model = contrastive_finetune(
             model,
             train_df,
             DATA_DIR,
-            epochs=10,
+            epochs=5,
             batch_size=4,
-            lr=1e-3,
+            lr=1e-5,
+            margin=1.0,
             device="cuda",
-            save_path=classifier_path
+            save_path=contrastive_path
         )
         model_volume.commit()
     
@@ -124,13 +116,13 @@ def run_pipeline():
     output_path = "/root/bdh_workspace/submission.csv"
     result_df = generate_predictions(
         model,
-        classifier,
+        None,  # No classifier, use perplexity-based
         test_df,
         DATA_DIR,
         output_path,
         device="cuda",
-        use_classifier=False,  # Use raw perplexity instead of classifier
-        perplexity_threshold=110.0  # Calibrated threshold: higher = contradict
+        use_classifier=False,
+        perplexity_threshold=100.0
     )
     
     # Read result for return

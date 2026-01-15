@@ -34,14 +34,19 @@ class BDHConfig:
     # Training
     max_seq_len: int = 8192     # Maximum sequence length per batch
     
+    
     # Device
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     dtype: torch.dtype = torch.float32
     
+    # Entity Tracking via Multi-Head Attention
+    n_heads: int = 16           # Number of heads for matrix attention
+    
     @property
     def head_dim(self) -> int:
         """Dimension per attention head."""
-        return self.embed_dim
+        assert self.n_neurons % self.n_heads == 0, f"n_neurons ({self.n_neurons}) must be divisible by n_heads ({self.n_heads})"
+        return self.n_neurons // self.n_heads
     
     @property
     def n_params(self) -> int:
@@ -57,8 +62,8 @@ class BDHConfig:
 
 # Preset configurations matching Table 2 in the paper
 CONFIGS = {
-    "micro": BDHConfig(n_neurons=512, embed_dim=64, n_layers=2),       # ~1M params (fits in memory)
-    "tiny": BDHConfig(n_neurons=1024, embed_dim=128, n_layers=2),      # ~3M params
-    "small": BDHConfig(n_neurons=2048, embed_dim=256, n_layers=4),     # ~12M params
-    "medium": BDHConfig(n_neurons=4096, embed_dim=384, n_layers=6),    # ~50M params
+    "micro": BDHConfig(n_neurons=512, embed_dim=64, n_layers=2, n_heads=8),       # ~1M params
+    "tiny": BDHConfig(n_neurons=1024, embed_dim=128, n_layers=2, n_heads=16),     # ~3M params
+    "small": BDHConfig(n_neurons=2048, embed_dim=256, n_layers=4, n_heads=32),    # ~12M params
+    "medium": BDHConfig(n_neurons=4096, embed_dim=384, n_layers=6, n_heads=64),   # ~50M params
 }

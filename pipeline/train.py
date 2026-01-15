@@ -366,3 +366,174 @@ def train_consistency_classifier(
         print(f"Saved to {save_path}")
     
     return model, classifier
+
+
+def contrastive_finetune(
+    model: BDH_GPU,
+    train_df: pd.DataFrame,
+    novel_dir: str,
+    epochs: int = 5,
+    batch_size: int = 4,
+    lr: float = 1e-5,
+    margin: float = 1.0,
+    device: str = "cuda",
+    save_path: Optional[str] = None
+) -> BDH_GPU:
+    """
+    Phase 3: Contrastive fine-tuning on labeled pairs.
+    
+    Key insight: 
+    - For CONSISTENT statements: perplexity with backstory should be LOWER
+    - For CONTRADICTORY statements: perplexity with backstory should be HIGHER
+    
+    We use a margin-based loss to push these apart.
+    """
+    import glob
+    
+    print("\n=== Phase 3: Contrastive Fine-tuning ===")
+    
+    model = model.to(device)
+    model.train()
+    
+    tokenizer = ByteTokenizer()
+    
+    # Prepare samples
+    samples = []
+    novel_cache = {}
+    
+    for _, row in train_df.iterrows():
+        book_name = str(row.get('book_name', '')).strip()
+        char = str(row.get('char', '')).strip()
+        caption = str(row.get('caption', '')).strip()
+        content = str(row.get('content', '')).strip()
+        label_str = str(row.get('label', '')).strip().lower()
+        
+        if not content or not label_str:
+            continue
+        
+        label = 1 if label_str == 'consistent' else 0
+        
+        # Get backstory (find the novel file)
+        book_lower = book_name.lower().strip()
+        txt_files = glob.glob(os.path.join(novel_dir, "*.txt"))
+        novel_path = None
+        
+        for txt_file in txt_files:
+            filename = os.path.basename(txt_file).lower()
+            if book_lower in filename or filename.replace('.txt', '') in book_lower:
+                novel_path = txt_file
+                break
+        
+        if novel_path is None:
+            continue
+        
+        # Load novel (cached)
+        if novel_path not in novel_cache:
+            with open(novel_path, 'r', encoding='utf-8', errors='replace') as f:
+                novel_cache[novel_path] = f.read()
+        
+        text = novel_cache[novel_path]
+        
+        # Extract backstory paragraphs mentioning character
+        char_lower = char.lower()
+        relevant = []
+        for para in text.split('\n\n'):
+            if char_lower in para.lower():
+                relevant.append(para.strip())
+        
+        backstory = '\n'.join(relevant[:30])[:8192]  # Limit size
+        
+        if not backstory:
+            continue
+        
+        samples.append({
+            'backstory': backstory,
+            'statement': content,
+            'label': label
+        })
+    
+    print(f"Prepared {len(samples)} samples for contrastive training")
+    
+    # Optimizer (fine-tune with small LR)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    
+    for epoch in range(epochs):
+        total_loss = 0
+        correct = 0
+        total = 0
+        
+        # Shuffle samples
+        import random
+        random.shuffle(samples)
+        
+        pbar = tqdm(range(0, len(samples), batch_size), desc=f"Epoch {epoch+1}/{epochs}")
+        
+        for i in pbar:
+            batch = samples[i:i + batch_size]
+            if len(batch) == 0:
+                continue
+            
+            optimizer.zero_grad()
+            batch_loss = 0
+            
+            for sample in batch:
+                backstory = sample['backstory']
+                statement = sample['statement']
+                label = sample['label']  # 1 = consistent, 0 = contradict
+                
+                # Tokenize
+                back_tokens = tokenizer.encode(backstory)[:2048]
+                stmt_tokens = tokenizer.encode(statement)[:256]
+                
+                back_tensor = torch.tensor([back_tokens], dtype=torch.long, device=device)
+                stmt_tensor = torch.tensor([stmt_tokens], dtype=torch.long, device=device)
+                
+                # Get perplexity WITH backstory context
+                _, state = model.forward(back_tensor)
+                ppl_with, _ = model.get_perplexity(stmt_tensor, state, per_sample=True)
+                
+                # Get perplexity WITHOUT backstory (fresh state)
+                ppl_without, _ = model.get_perplexity(stmt_tensor, None, per_sample=True)
+                
+                # Contrastive loss
+                # diff = ppl_with - ppl_without
+                # For consistent: we want ppl_with < ppl_without → diff < 0 → minimize diff
+                # For contradict: we want ppl_with > ppl_without → diff > 0 → maximize diff
+                diff = ppl_with - ppl_without
+                
+                if label == 1:  # Consistent
+                    # Loss = max(0, diff + margin)  → push diff below -margin
+                    loss = F.relu(diff + margin).mean()
+                else:  # Contradict
+                    # Loss = max(0, -diff + margin) → push diff above margin
+                    loss = F.relu(-diff + margin).mean()
+                
+                batch_loss = batch_loss + loss
+                
+                # Track accuracy
+                predicted = 1 if diff.item() < 0 else 0
+                if predicted == label:
+                    correct += 1
+                total += 1
+            
+            # Average over batch
+            batch_loss = batch_loss / len(batch)
+            
+            # Backward
+            batch_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            total_loss += batch_loss.item()
+            pbar.set_postfix({'loss': f'{batch_loss.item():.4f}', 'acc': f'{correct/max(1,total):.2%}'})
+        
+        avg_loss = total_loss / max(1, len(samples) // batch_size)
+        accuracy = correct / max(1, total)
+        print(f"Epoch {epoch+1}: Loss = {avg_loss:.4f}, Accuracy = {accuracy:.2%}")
+    
+    # Save
+    if save_path:
+        torch.save(model.state_dict(), save_path)
+        print(f"Saved contrastive-finetuned model to {save_path}")
+    
+    return model

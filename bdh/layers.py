@@ -198,3 +198,107 @@ class ParallelLinearAttention(nn.Module):
         state: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.attention(x, v, state)
+
+
+class MultiHeadMatrixAttention(nn.Module):
+    """
+    Multi-Head Matrix Attention (Block-Diagonal).
+    
+    Splits neurons into H heads. Each head maintains a full matrix state d x d.
+    This enables binding between features within the same head (entity tracking),
+    while keeping the total state size manageable (O(n^2/H)).
+    """
+    def __init__(self, dim: int, n_heads: int, decay_rate: float = 0.99):
+        super().__init__()
+        self.dim = dim
+        self.n_heads = n_heads
+        assert dim % n_heads == 0, "dim must be divisible by n_heads"
+        self.head_dim = dim // n_heads
+        
+        self.decay_rate = decay_rate
+        
+        # Learnable decay per head (broadcast across head_dim)
+        # We use sigmoid(log_decay) to ensure decay is in (0, 1)
+        self.log_decay = nn.Parameter(torch.ones(n_heads, 1, 1) * math.log(decay_rate))
+    
+    @property
+    def decay(self) -> torch.Tensor:
+        return torch.sigmoid(self.log_decay)
+    
+    def forward(
+        self,
+        x: torch.Tensor,           # [batch, seq, dim]
+        v: torch.Tensor,           # [batch, seq, dim]
+        state: Optional[torch.Tensor] = None  # [batch, n_heads, head_dim, head_dim]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute multi-head matrix attention.
+        """
+        batch, seq_len, dim = x.shape
+        head_dim = self.head_dim
+        n_heads = self.n_heads
+        device = x.device
+        dtype = x.dtype
+        
+        # Reshape to heads: [batch, seq, n_heads, head_dim]
+        try:
+            x_heads = x.view(batch, seq_len, n_heads, head_dim)
+            v_heads = v.view(batch, seq_len, n_heads, head_dim)
+        except RuntimeError:
+            raise ValueError(f"Shape mismatch: {x.shape} cannot be viewed as [B, L, {n_heads}, {head_dim}]")
+        
+        # Prepare contributions: v * x^T (outer product per head)
+        # v_heads: [batch, seq, n_heads, head_dim, 1]
+        # x_heads: [batch, seq, n_heads, 1, head_dim]
+        # -> [batch, seq, n_heads, head_dim, head_dim]
+        contributions = torch.matmul(
+            v_heads.unsqueeze(-1), 
+            x_heads.unsqueeze(-2)
+        )
+        
+        # Initialize state if needed
+        # State shape: [batch, n_heads, head_dim, head_dim]
+        if state is None:
+            state = torch.zeros(batch, n_heads, head_dim, head_dim, device=device, dtype=dtype)
+        
+        # Parallel cumsum implementation for efficiency
+        # This mirrors the ParallelLinearAttention logic but with matrix states
+        
+        # Create decay weights: [1, seq, n_heads, 1, 1]
+        positions = torch.arange(seq_len, device=device, dtype=dtype)
+        # decay is [n_heads, 1, 1] -> [1, 1, n_heads, 1, 1]
+        decay_per_head = self.decay.view(1, 1, n_heads, 1, 1)
+        # decay_weights: [1, seq, n_heads, 1, 1]
+        decay_weights = decay_per_head ** positions.view(1, seq_len, 1, 1, 1)
+        
+        inv_decay_weights = 1.0 / (decay_weights + 1e-8)
+        
+        # Scale -> Cumsum -> Rescale
+        # [batch, seq, n_heads, head_dim, head_dim]
+        scaled_contribs = contributions * inv_decay_weights
+        cumsum = torch.cumsum(scaled_contribs, dim=1)
+        state_seq = cumsum * decay_weights
+        
+        # Add previous state contribution
+        if state is not None:
+            # Previous state needs to be decayed by [1, 2, ..., seq_len] steps
+            # state_decay: [1, seq, n_heads, 1, 1]
+            state_decay = decay_per_head ** (positions.view(1, seq_len, 1, 1, 1) + 1)
+            
+            # state: [batch, 1, n_heads, head_dim, head_dim]
+            state_contribution = state.unsqueeze(1) * state_decay
+            state_seq = state_seq + state_contribution
+            
+        # Compute output: state * x
+        # state_seq: [batch, seq, n_heads, head_dim, head_dim]
+        # x_heads:   [batch, seq, n_heads, head_dim, 1]
+        # output ->  [batch, seq, n_heads, head_dim, 1]
+        output_heads = torch.matmul(state_seq, x_heads.unsqueeze(-1)).squeeze(-1)
+        
+        # Merge heads: [batch, seq, n_heads, head_dim] -> [batch, seq, dim]
+        output = output_heads.view(batch, seq_len, dim)
+        
+        # Final state for next chunk: Take last time step
+        final_state = state_seq[:, -1, :, :, :]  # [batch, n_heads, head_dim, head_dim]
+        
+        return output, final_state
