@@ -80,48 +80,31 @@ def run_training_step(system, train_df, optimizer):
         content = str(row['content']).strip()
         label = str(row['label']).strip().lower()
         
-        if not content: continue # Skip empty content rows
+        if not content: continue 
         is_contradict = (label == 'contradict')
         
         key = (book, char)
-        if key in system.backstory_states:
-            world_state = system.backstory_states[key]
-        else:
-            system.bdh.reset_state()
-            world_state = system.bdh.get_state()
+        backstory_state = system.backstory_states.get(key)
         
-        if pd.isna(content) or not str(content).strip():
-            pbar.update(1)
-            continue
-            
-        content = str(content).strip()
         optimizer.zero_grad()
         
-        # In GPT-2 style training, we train on the context chunks
-        # to maximize the likelihood of the text.
-        # This makes the PMI check effective because the model will recognize "known" facts.
+        # 1. Get Base Semantic Embedding [1, 384]
+        vec_np = system.encoder.encode([content], convert_to_numpy=True)
+        vec = torch.from_numpy(vec_np).to(system.device).unsqueeze(1) # [1, 1, 384]
         
-        tokens_list = system.tokenizer.encode(content)
-        if len(tokens_list) < 2:
-            tokens_list = tokens_list + [0]
-            
-        tokens = torch.tensor([tokens_list], device=system.device)
-        targets = tokens.clone()
-        
-        # Binary Label for Semantic Supervision
-        # 1.0 for consistent, 0.0 for contradict
+        # 2. Refined Forward Pass with Memory
+        if backstory_state:
+             system.bdh.set_state(backstory_state)
+        else:
+             system.bdh.reset_state()
+             
+        # Label: 1.0 for consistent, 0.0 for contradict
         y_label = torch.tensor([[1.0 if not is_contradict else 0.0]], device=system.device)
         
-        logits, loss_causal, _, linkage_logit = system.bdh(tokens, targets=targets, use_state=True)
+        # forward returns (soul_vec, logit, loss)
+        _, _, loss = system.bdh(vec, targets=y_label, use_state=True)
         
-        # Semantic Loss (Binary Cross Entropy)
-        # This trains the 'Semantic Meaning' head directly from your examples
-        loss_semantic = F.binary_cross_entropy_with_logits(linkage_logit, y_label)
-        
-        # Total Unified Loss
-        loss = 0.5 * loss_causal + 0.5 * loss_semantic
-        
-        # Backward and step
+        # 3. Backward
         loss.backward()
         torch.nn.utils.clip_grad_norm_(system.bdh.parameters(), max_norm=1.0)
         optimizer.step()

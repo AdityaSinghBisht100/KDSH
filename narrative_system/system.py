@@ -5,16 +5,17 @@ import numpy as np
 import sys
 import os
 import random
-import tiktoken
+from sentence_transformers import SentenceTransformer
 
 from pathlib import Path
 from typing import List, Dict, Tuple
 from tqdm import tqdm
 
-# Internal imports from the package
-from .world_state import WorldState, EntityWriteGate, AdaptiveMerge
-from .consistency import CounterfactualChecker, ContrastiveEnergyLoss, SURPRISE_MAX
-from .models import NarrativeDataset
+from .world_state import WorldState
+
+# Constants
+EMBEDDING_DIM = 256 # Internal memory dimension
+SEMANTIC_DIM = 384  # Based on all-MiniLM-L6-v2
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -24,23 +25,6 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# Fix for import resolution
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-try:
-    from bdh import BDH, BDHConfig
-    from sentence_analyzer import SentenceAnalyzer
-except ImportError:
-    print("Warning: Could not import BDH/SentenceAnalyzer directly. Please ensure they are in the python path.")
-    raise
-
-# Constants
-MAX_SEQ_LEN = 128
-EMBEDDING_DIM = 256
-
 class NarrativeConsistencySystem:
     def __init__(self, data_dir="./files", model_dir="./models"):
         self.data_dir = data_dir
@@ -48,14 +32,15 @@ class NarrativeConsistencySystem:
         if not os.path.exists(self.model_dir):
             os.makedirs(self.model_dir, exist_ok=True)
             
-        self.backstory_store = {}
-        self.device = None
-        self.classifier = None
+        self.encoder = None
         self.bdh = None
-        # Entity-Aware WorldState: book_name → WorldState
-        self.world_states: Dict[str, WorldState] = {}
-        self.backstory_states = {}  # Legacy compatibility
+        self.checker = None
+        self.device = None
         
+        # Entity-Aware WorldState: book_name → WorldState
+        self.world_states = {}
+        self.backstory_states = {} 
+
     def __enter__(self):
         print("--> Starting __enter__ initialization")
         try:
@@ -65,20 +50,15 @@ class NarrativeConsistencySystem:
             import traceback
             traceback.print_exc()
             raise
-            
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
 
     def _initialize_components(self):
-        if self.classifier is not None:
+        if self.encoder is not None:
             return
 
         print(f"Initializing components in pid {os.getpid()}")
-        
-        # Re-import BDH config to be sure
-        from bdh import BDH, BDHConfig
-        # Import tiktoken for BPE
-        import tiktoken
         
         if torch.cuda.is_available():
             self.device = torch.device('cuda')
@@ -87,27 +67,21 @@ class NarrativeConsistencySystem:
             self.device = torch.device('cpu')
             print("⚠️ CUDA NOT available. Using CPU.")
         
-        print(f"Initialized on {self.device}")
-        
-        # Initialize BPE Tokenizer
-        try:
-            self.tokenizer = tiktoken.get_encoding("cl100k_base")
-            v_size = self.tokenizer.n_vocab
-            print(f"✅ Tokenizer initialized (Vocab: {v_size})")
-        except Exception as e:
-            print(f"❌ Failed to load tiktoken: {e}")
-            raise
+        # 1. Load Semantic Encoder
+        print(f"  🧠 Loading Semantic Encoder (MiniLM)...")
+        self.encoder = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
+        self.encoder.eval()
 
-        # Initialize GPT2-BDH Transformer (Unified Architecture)
+        # 2. Initialize GPT2-BDH Transformer (Vector Space Version)
         from bdh_transformer import GPT2BDHTransformer
         from dataclasses import dataclass
         
         @dataclass
         class Config:
-            n_layer: int = 6
+            n_layer: int = 4
             n_embd: int = EMBEDDING_DIM
+            input_dim: int = SEMANTIC_DIM # 384
             n_head: int = 4
-            vocab_size: int = v_size
             block_size: int = 1024
             dropout: float = 0.1
             
@@ -116,103 +90,80 @@ class NarrativeConsistencySystem:
         self.bdh = GPT2BDHTransformer(self.config).to(self.device)
         self.bdh.eval()
         
-        # Load weights if exist
-        bdh_path = os.path.join(self.model_dir, "bdh_transformer.pt")
+        # 3. Load Trained Weights if exist
+        bdh_path = os.path.abspath(os.path.join(self.model_dir, "bdh_transformer.pt"))
         if os.path.exists(bdh_path):
              try:
                  self.bdh.load_state_dict(torch.load(bdh_path, map_location=self.device, weights_only=False), strict=False)
-                 print("✅ Transformer weights loaded.")
-             except Exception:
-                 print("⚠️ Weights found but incompatible. Starting fresh.")
+                 print("  ✅ Semantic Transformer weights loaded.")
+             except Exception as e:
+                 print(f"  ⚠️ Weights incompatible ({e}). Using baseline.")
 
-        # Unified Checker
+        # 4. Linkage Checker
         from .linkage_check import NarrativeLinkageChecker
-        self.checker = NarrativeLinkageChecker(self.bdh, self.tokenizer, self.device)
+        self.checker = NarrativeLinkageChecker(self.bdh, self.encoder, self.device)
         
-        self.backstory_states = {} # Map (book, char) -> List of Layer States
         print("--> Initialization complete")
 
     def encode_text(self, text_list, distinct_states=None):
-        if self.bdh is None:
+        """
+        Convert list of strings into Semantic Vectors [B, 1, D].
+        """
+        if self.encoder is None:
             self._initialize_components()
             
         if not text_list:
-            return torch.zeros((1, EMBEDDING_DIM), device=self.device)
+            # Handle empty list case
+            return torch.zeros((1, 1, SEMANTIC_DIM), device=self.device)
             
-        batch_tensors = []
-        for text in text_list:
-            # BPE Tokenization
-            # tiktoken encodes to list of ints
-            tokens_list = self.tokenizer.encode(text)
+        # 1. Encode into LLM Space (MiniLM 384-dim)
+        with torch.no_grad():
+            vecs_np = self.encoder.encode(text_list, convert_to_numpy=True)
             
-            # Truncate if too long (though BDH handles infinite, we batch here)
-            if len(tokens_list) > MAX_SEQ_LEN:
-                tokens_list = tokens_list[:MAX_SEQ_LEN]
-            
-            tokens = torch.tensor(tokens_list, dtype=torch.long, device=self.device)
-                
-            if len(tokens) == 0:
-                 tokens = torch.zeros(1, dtype=torch.long, device=self.device)
-            batch_tensors.append(tokens)
-            
-        max_len = max([len(t) for t in batch_tensors])
-        padded = torch.zeros(len(batch_tensors), max_len, dtype=torch.long, device=self.device)
-        for i, t in enumerate(batch_tensors):
-            padded[i, :len(t)] = t
-            
-        # Manage State for Contextual Encoding
+        # 2. Convert to Tensor [B, 1, D]
+        vecs = torch.from_numpy(vecs_np).to(self.device).unsqueeze(1)
+        
+        # 3. Apply Context if States are provided
         if distinct_states is not None:
-             # Case 1: Single State shared for all inputs
-             if isinstance(distinct_states, torch.Tensor): 
-                 self.bdh.set_state(distinct_states.to(self.device))
-             pass 
-
-        if distinct_states is None:
-             # Isolated: Standard forward, no state usage (or reset first)
-             self.bdh.reset_state() # Ensure clean slate
-             with torch.no_grad():
-                sent_emb = self.bdh.compute_embeddings(padded)
-        else:
-             # Contextual loop
              sent_embs = []
              for i in range(len(text_list)):
-                  # Get specific state
-                  if isinstance(distinct_states, list):
-                      s = distinct_states[i]
-                  else:
-                      s = distinct_states # Broadcast
+                  s = distinct_states[i] if isinstance(distinct_states, list) else distinct_states
+                  # s is a list of [nh, d, d] tensors (one per layer)
+                  self.bdh.set_state(s)
                   
-                  self.bdh.set_state(s.to(self.device))
-                  row = padded[i:i+1] # [1, T]
-                  
+                  row = vecs[i:i+1] # [1, 1, D]
                   with torch.no_grad():
-                      # New 4-value return from GPT2BDHTransformer
-                      _, _, z_semantic, _ = self.bdh(row, use_state=True)
-                      sent_embs.append(z_semantic)
-             sent_emb = torch.cat(sent_embs, dim=0)
+                      refined_vec, _, _ = self.bdh(row, use_state=True)
+                      sent_embs.append(refined_vec)
+             # Return [B, 1, D] refined vectors
+             return torch.cat(sent_embs, dim=0).unsqueeze(1) 
 
-        return sent_emb
+        return vecs
 
     def absorb_story_stream(self, text_stream):
         """
         Reads a full story stream and returns the Final State.
-        Expected to process book content.
+        Uses sentence-level semantic chunks.
         """
+        if self.encoder is None: self._initialize_components()
         self.bdh.reset_state()
         
-        # Determine chunk size 
-        chunk_size = 512
+        # Simple sentence-like chunking for story ingestion
+        import re
+        chunks = re.split(r'(?<=[.!?])\s+', text_stream)
+        chunks = [c.strip() for c in chunks if len(c.strip()) > 5]
         
-        with torch.no_grad():
-            for i in range(0, len(text_stream), chunk_size):
-                chunk = text_stream[i : i+chunk_size]
-                # BPE Fix
-                ids = self.tokenizer.encode(chunk)
-                tokens = torch.tensor([ids], dtype=torch.long, device=self.device)
-                if tokens.size(1) == 0: continue
+        batch_size = 16
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i : i + batch_size]
+            with torch.no_grad():
+                # Get embeddings [B, 384]
+                vecs_np = self.encoder.encode(batch, convert_to_numpy=True)
+                vecs = torch.from_numpy(vecs_np).to(self.device).unsqueeze(1) # [B, 1, D]
                 
-                # Forward Pass with State Update
-                self.bdh(tokens, use_state=True)
+                # Sequential update of the BDH persistent state
+                for seq_idx in range(vecs.size(0)):
+                    self.bdh(vecs[seq_idx:seq_idx+1], use_state=True)
                 
         return self.bdh.get_state()
 

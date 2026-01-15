@@ -115,7 +115,6 @@ def ingest_novel_knowledge(system, train_df, test_mode=True):
         print("  ✅ Cache saved.")
 
 def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
-    chunk_size = 512
     system.bdh.reset_state()
     
     # Helper to capture Current state as list of layers
@@ -126,40 +125,49 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
     entity_states = {e: [s.clone() for s in global_state] for e in entities}
     entity_memories = {e: [] for e in entities} 
     
-    all_tokens_ids = system.tokenizer.encode(text)
-    total_tokens = len(all_tokens_ids)
-    total_chunks = (total_tokens + chunk_size - 1) // chunk_size
+    # 1. Semantic Chunking (Sentence Level)
+    import re
+    chunks = re.split(r'(?<=[.!?])\s+', text)
+    chunks = [c.strip() for c in chunks if len(c.strip()) > 10] # Filter very short noise
+    
+    batch_size = 16
+    total_chunks = len(chunks)
     
     with torch.no_grad():
-        with tqdm(total=total_chunks, desc="  Processing Chunks", unit="chunk", leave=False) as pbar:
-            for i in range(0, total_tokens, chunk_size):
-                chunk_ids = all_tokens_ids[i : i + chunk_size]
-                tokens = torch.tensor([chunk_ids], dtype=torch.long, device=system.device)
-                chunk_text = system.tokenizer.decode(chunk_ids)
+        with tqdm(total=total_chunks, desc="  Semantic Ingestion", unit="sent", leave=False) as pbar:
+            for i in range(0, total_chunks, batch_size):
+                batch = chunks[i : i + batch_size]
                 
-                # 1. Update Global State
-                system.bdh.reset_state()
-                for layer_idx, block in enumerate(system.bdh.transformer.h):
-                    block.attn.state.copy_(global_state[layer_idx].to(system.device))
+                # 2. Convert Batch to Semantic Vectors [B, 384]
+                vecs_np = system.encoder.encode(batch, convert_to_numpy=True)
+                # vecs: [B, 1, 384]
+                vecs = torch.from_numpy(vecs_np).to(system.device).unsqueeze(1)
                 
-                system.bdh(tokens, use_state=True)
-                global_state = get_full_state(system.bdh)
-                
-                # 2. Update Mentioned Entities
-                chunk_lower = chunk_text.lower()
-                mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
-                
-                for entity in mentioned_entities:
-                    system.bdh.reset_state()
-                    # Load Entity Private State
-                    for layer_idx, block in enumerate(system.bdh.transformer.h):
-                        block.attn.state.copy_(entity_states[entity][layer_idx].to(system.device))
+                # 3. Process Chunk-by-Chunk for State Updates
+                for idx, chunk_text in enumerate(batch):
+                    v = vecs[idx:idx+1] # [1, 1, 384]
                     
-                    # Update with new chunk
-                    system.bdh(tokens, use_state=True)
-                    entity_states[entity] = get_full_state(system.bdh)
-                
-                pbar.update(1)
+                    # Update Global State
+                    system.bdh.reset_state()
+                    for layer_idx, block in enumerate(system.bdh.transformer.h):
+                        block.attn.state.copy_(global_state[layer_idx].to(system.device))
+                    
+                    system.bdh(v, use_state=True)
+                    global_state = get_full_state(system.bdh)
+                    
+                    # Update Mentioned Entities
+                    chunk_lower = chunk_text.lower()
+                    mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
+                    
+                    for entity in mentioned_entities:
+                        system.bdh.reset_state()
+                        for layer_idx, block in enumerate(system.bdh.transformer.h):
+                            block.attn.state.copy_(entity_states[entity][layer_idx].to(system.device))
+                        
+                        system.bdh(v, use_state=True)
+                        entity_states[entity] = get_full_state(system.bdh)
+                        
+                pbar.update(len(batch))
     
     world_state = WorldState(
         global_state=global_state,

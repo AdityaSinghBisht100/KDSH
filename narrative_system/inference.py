@@ -3,20 +3,19 @@ import torch
 import pandas as pd
 from tqdm import tqdm
 from .ingestion import ingest_novel_knowledge
-from .consistency import CounterfactualChecker
 
 def predict_single(system, book_name, char_name, content):
     book_name = book_name.strip()
     char_name = char_name.strip()
     key = (book_name, char_name)
     
-    if system.bdh is None: system._initialize_components()
+    if system.encoder is None: system._initialize_components()
     
     if key not in system.backstory_states:
             if book_name in system.world_states:
                 ws = system.world_states[book_name]
                 state = ws.get_query_state(char_name)
-                system.backstory_states[key] = state.to(system.device)
+                system.backstory_states[key] = state
             else:
                 book_path = os.path.join(system.data_dir, f"{book_name}.txt")
                 if not os.path.exists(book_path):
@@ -29,18 +28,18 @@ def predict_single(system, book_name, char_name, content):
                 state = system.bdh.get_state()
                 system.backstory_states[key] = state
 
-    state = system.backstory_states[key] # List of states
+    state = system.backstory_states[key] 
     
-    # Check linkage using research-standard PMI
-    label, pmi = system.checker.check_linkage(content, state)
+    # Check linkage using Semantic Grounding
+    label, confidence = system.checker.check_linkage(content, state)
     
     score = 0.9 if label == "consistent" else 0.1
-    rationale = f"PMI Score: {pmi:.4f}. "
+    rationale = f"Semantic Confidence: {confidence:.2%}. "
     
     if score > 0.5:
-        rationale += f"Backstory strongly supports this statement."
+        rationale += f"Statement aligns with character's semantic profile."
     else:
-        rationale += f"Backstory significantly reduces the likelihood of this statement."
+        rationale += f"Semantic contradiction detected against established backstory."
         
     return score, rationale
 

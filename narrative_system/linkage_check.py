@@ -1,78 +1,65 @@
-import torch
-import torch.nn.functional as F
-
 class NarrativeLinkageChecker:
     """
-    Research-principled Linkage detection.
-    Based on the assumption that a 'linked' backstory reduces the entropy of the current story.
-    Score = log P(Statement | Backstory) - log P(Statement | Default)
+    Semantic-Principled Linkage detection.
+    Compares the 'Soul Vector' of a Statement against the Backstory state.
     """
-    def __init__(self, model, tokenizer, device):
+    def __init__(self, model, encoder, device):
         self.model = model
-        self.tokenizer = tokenizer
+        self.encoder = encoder
         self.device = device
         
-    def compute_log_likelihood(self, text, use_backstory=True):
+    def get_semantic_representation(self, text, state=None):
         """
-        Calculates the average log-probability of a text.
+        Refines a text's semantic vector using the provided backstory state.
         """
-        # 1. Encode
         text = str(text).strip()
-        tokens_list = self.tokenizer.encode(text) if text else [0]
-        
-        # Handle too short sequences for causal shift
-        if len(tokens_list) < 2:
-             tokens_list = tokens_list + [0]
+        if not text:
+             return torch.zeros((1, 256), device=self.device), torch.tensor([0.0], device=self.device)
              
-        tokens = torch.tensor([tokens_list], device=self.device)
-        targets = tokens.clone()
-        
-        # 2. Forward pass
-        # If not using backstory, we reset the model state before the call.
-        if not use_backstory:
-            self.model.reset_state()
-            
+        # 1. Base Semantic Embedding [1, 384]
         with torch.no_grad():
-            logits, _, _, linkage_logit = self.model(tokens, use_state=True)
+            vec_np = self.encoder.encode([text], convert_to_numpy=True)
+            vec = torch.from_numpy(vec_np).to(self.device).unsqueeze(1) # [1, 1, 384]
             
-        # 3. Calculate mean log-probs
-        log_probs = F.log_softmax(logits, dim=-1)
-        targets = targets[:, 1:].unsqueeze(-1)
-        log_probs = log_probs[:, :-1, :]
-        
-        gathered = torch.gather(log_probs, -1, targets).squeeze(-1)
-        return gathered.mean().item(), linkage_logit
+        # 2. Refinement through BDH Memory
+        if state is not None:
+             self.model.set_state(state)
+        else:
+             self.model.reset_state()
+             
+        with torch.no_grad():
+            # refined_vec: [1, 256], logit: [1, 1]
+            refined_vec, linkage_logit, _ = self.model(vec, use_state=True)
+            
+        return refined_vec, linkage_logit
 
     def check_linkage(self, statement, backstory_state=None):
         """
-        Decision function using Hybrid PMI + Semantic logic.
+        Decision function using Hybrid Semantic Logic.
         """
-        # P(Statement | Backstory)
-        if backstory_state is not None:
-             for i, block in enumerate(self.model.transformer.h):
-                 if backstory_state[i].shape != block.attn.state.shape:
-                      continue
-                 block.attn.state.copy_(backstory_state[i].to(self.device))
+        # 1. Statement logic IN CONTEXT
+        vec_ctx, logit_ctx = self.get_semantic_representation(statement, backstory_state)
         
-        lp_conditional, linkage_logit = self.compute_log_likelihood(statement, use_backstory=True)
+        # 2. Statement logic IN ISOLATION (Baseline)
+        vec_base, _ = self.get_semantic_representation(statement, None)
         
-        # P(Statement | Empty)
-        lp_marginal, _ = self.compute_log_likelihood(statement, use_backstory=False)
+        # 3. Decision Signals
+        # Signal A: Semantic Classifier (Trained on supervised labels)
+        semantic_prob = torch.sigmoid(logit_ctx).item()
         
-        # PMI = Conditional - Marginal
-        pmi = lp_conditional - lp_marginal
+        # Signal B: State Shift (How much did the context change the meaning?)
+        # A consistent statement should have a high cosine similarity with its baseline
+        # but also be "expected" by the memory.
+        similarity = F.cosine_similarity(vec_ctx, vec_base).item()
         
-        # Semantic Prob from Classifier
-        semantic_prob = torch.sigmoid(linkage_logit).item()
-        
-        # Fusion Decision:
-        # We trust the semantic classifier but use PMI as a sanity check.
-        # A statement is consistent if it's semantically likely AND logically plausible.
-        is_consistent = (semantic_prob > 0.5) and (pmi > -0.5) 
+        # Fusion:
+        # A statement is consistent if the classifier says so AND it doesn't radically 
+        # shift the semantic meaning away from its grounded baseline in a "confused" way.
+        is_consistent = (semantic_prob > 0.5) and (similarity > 0.7)
         
         label = "consistent" if is_consistent else "contradict"
         
-        # Return a score that balances probabilistic and semantic confidence
-        confidence = 0.5 * semantic_prob + 0.5 * (1.0 if pmi > 0 else 0.0)
+        # Confidence blends the classifier certainty and the semantic stability
+        confidence = 0.6 * semantic_prob + 0.4 * similarity
         
         return label, confidence

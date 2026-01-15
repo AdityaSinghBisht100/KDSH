@@ -119,27 +119,23 @@ class GPT2BDHTransformer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        
+        # Semantic Projection: [Pre-trained Dim] -> [BDH Internal Dim]
+        self.vec_proj = nn.Linear(config.input_dim, config.n_embd)
+        
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([BDHBlock(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
-        # Semantic Pooling Head: Compresses sequence into Meaning Vector
-        self.semantic_head = nn.Sequential(
-            nn.Linear(config.n_embd, config.n_embd),
+        # Consistency Classifier: Binary logit (Consistent vs Contradict)
+        self.classifier_head = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd // 2),
             nn.Tanh(),
-            nn.Linear(config.n_embd, config.n_embd) 
+            nn.Linear(config.n_embd // 2, 1)
         )
         
-        # Binary Classifier: Takes Semantic Vector -> Consistent (1) or Contradict (0)
-        self.classifier_head = nn.Linear(config.n_embd, 1)
-        
-        # Weight sharing as per GPT-2
-        self.transformer.wte.weight = self.lm_head.weight
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -163,42 +159,37 @@ class GPT2BDHTransformer(nn.Module):
         for i, block in enumerate(self.transformer.h):
             block.attn.state.copy_(state_list[i])
 
-    def get_semantic_embedding(self, idx, use_state=True):
+    def forward(self, vecs, targets=None, use_state=False):
         """
-        Extract the Semantic Meaning Vector for a sequence.
+        Forward pass for semantic vectors.
+        Args:
+            vecs: [Batch, SeqLen, Pretrained_Dim]
         """
-        self.eval()
-        with torch.no_grad():
-            _, _, semantic_vec = self.forward(idx, use_state=use_state)
-        return semantic_vec
-
-    def forward(self, idx, targets=None, use_state=False):
-        device = idx.device
-        b, t = idx.size()
+        device = vecs.device
+        b, t, d_in = vecs.size()
         
-        # 1. Embeddings
-        pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)
-        tok_emb = self.transformer.wte(idx)
-        pos_emb = self.transformer.wpe(pos)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        # 1. Project to Internal Dimension
+        x = self.vec_proj(vecs)
+        x = self.transformer.drop(x)
         
-        # 2. Sequential Blocks
+        # 2. Sequential Blocks (BDH Memory Fusion)
         for block in self.transformer.h:
             x = block(x, use_state=use_state)
             
-        # 3. Final Head
+        # 3. Final Norm
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
         
-        # 4. Semantic Pooling: Use the hidden state of the LAST token
-        # z_semantic: [Batch, Embedding_Dim]
-        z_semantic = self.semantic_head(x[:, -1, :])
+        # 4. Global Semantic Representative (Soul Vector)
+        # We mean-pool the refined semantic sequence
+        soul_vec = x.mean(dim=1) # [Batch, Internal_Dim]
         
         # 5. Consistency Logit: Direct prediction of Linkage
-        linkage_logit = self.classifier_head(z_semantic)
+        linkage_logit = self.classifier_head(soul_vec)
         
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+             # Supervised Classification Loss (BCE)
+             # targets expected to be [Batch, 1] float labels (1.0 for consistent)
+             loss = F.binary_cross_entropy_with_logits(linkage_logit, targets)
             
-        return logits, loss, z_semantic, linkage_logit
+        return soul_vec, linkage_logit, loss
