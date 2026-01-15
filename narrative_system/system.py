@@ -82,8 +82,8 @@ class NarrativeConsistencySystem:
         # Initialize BPE Tokenizer
         try:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
-            vocab_size = self.tokenizer.n_vocab
-            print(f"✅ Tokenizer initialized (Vocab: {vocab_size})")
+            v_size = self.tokenizer.n_vocab
+            print(f"✅ Tokenizer initialized (Vocab: {v_size})")
         except Exception as e:
             print(f"❌ Failed to load tiktoken: {e}")
             raise
@@ -97,7 +97,7 @@ class NarrativeConsistencySystem:
             n_layer: int = 6
             n_embd: int = EMBEDDING_DIM
             n_head: int = 4
-            vocab_size: int = vocab_size
+            vocab_size: int = v_size
             block_size: int = 1024
             dropout: float = 0.1
             
