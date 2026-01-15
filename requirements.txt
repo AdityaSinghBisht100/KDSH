@@ -6,11 +6,13 @@ numpy>=1.24.0
 pandas>=2.0.0
 tqdm
 
-# Tokenization
-tiktoken
+# Semantic Grounding
+sentence-transformers
+transformers
+huggingface-hub
 
-# Cloud Deployment (Optional)
-modal>=0.50.0
+# Tokenization (Legacy/Auxiliary)
+tiktoken
 
 # Testing
 pytest
