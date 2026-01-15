@@ -29,34 +29,18 @@ def predict_single(system, book_name, char_name, content):
                 state = system.bdh.get_state()
                 system.backstory_states[key] = state
 
-    state = system.backstory_states[key].to(system.device) # Entity specific
+    state = system.backstory_states[key] # List of states
     
-    # "Actually check with world_state" logic:
-    # Use AdaptiveMerge to combine entity history with the global "vibe" 
-    # conditioned on the query content.
-    if book_name in system.world_states:
-        global_state = system.world_states[book_name].global_state.to(system.device)
-        
-        # Get query embedding
-        tokens = torch.tensor([system.tokenizer.encode(content)], device=system.device)
-        with torch.no_grad():
-            query_emb = system.bdh(tokens, return_embeddings=True).mean(dim=1)
-            
-        # Dynamic Merge
-        merged_state = system.adaptive_merge(query_emb, global_state, state)
-    else:
-        merged_state = state
-
-    checker = CounterfactualChecker(system.bdh, system.tokenizer, system.device)
-    details = checker.predict_with_details(content, merged_state)
+    # Check linkage using research-standard PMI
+    label, pmi = system.checker.check_linkage(content, state)
     
-    score = 0.1 if details['prediction'] == 'contradict' else 0.9
-    rationale = f"Energy Delta: {details['energy_delta']:.4f}. "
+    score = 0.9 if label == "consistent" else 0.1
+    rationale = f"PMI Score: {pmi:.4f}. "
     
     if score > 0.5:
-        rationale += f"Statement aligns with {char_name}'s world state."
+        rationale += f"Backstory strongly supports this statement."
     else:
-        rationale += f"Conflict detected in {char_name}'s state trajectory."
+        rationale += f"Backstory significantly reduces the likelihood of this statement."
         
     return score, rationale
 

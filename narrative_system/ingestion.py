@@ -109,31 +109,17 @@ def ingest_novel_knowledge(system, train_df, test_mode=True):
         print("  ✅ Cache saved.")
 
 def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
-    # Optimization: Chunk size in TOKENS (approx 4 chars per token)
-    chunk_size = 256
-    
+    chunk_size = 512
     system.bdh.reset_state()
-    initial_state = system.bdh.get_state().cpu()
     
-    global_state = initial_state.clone()
-    entity_states = {e: initial_state.clone() for e in entities}
-    
-    entity_timestamps = {e: 0.0 for e in entities}
-    global_timestamp = 0.0
-    
-    entity_update_counts = {e: 0 for e in entities}
-    gate_values = {e: [] for e in entities} 
+    # Helper to capture Current state as list of layers
+    def get_full_state(model):
+        return [block.attn.state.clone().cpu() for block in model.transformer.h]
+
+    global_state = get_full_state(system.bdh)
+    entity_states = {e: [s.clone() for s in global_state] for e in entities}
     entity_memories = {e: [] for e in entities} 
     
-    state_dim = initial_state.numel()
-    write_gate = EntityWriteGate(state_dim=64, proj_dim=32).to(system.device)
-    write_gate.eval() 
-    
-    current_time = 0.0
-    
-    # BPE Tokenization (Full Text)
-    # This replaces the character-based chunking
-    print("    -> Tokenizing full text (BPE)...")
     all_tokens_ids = system.tokenizer.encode(text)
     total_tokens = len(all_tokens_ids)
     total_chunks = (total_tokens + chunk_size - 1) // chunk_size
@@ -142,80 +128,37 @@ def _entity_aware_ingest(system, text: str, entities: set) -> WorldState:
         with tqdm(total=total_chunks, desc="  Processing Chunks", unit="chunk", leave=False) as pbar:
             for i in range(0, total_tokens, chunk_size):
                 chunk_ids = all_tokens_ids[i : i + chunk_size]
-                chunk_len = len(chunk_ids)
-                
-                # Convert to tensor
                 tokens = torch.tensor([chunk_ids], dtype=torch.long, device=system.device)
-                
-                # Decode for Entity Aware Logic (String Matching)
                 chunk_text = system.tokenizer.decode(chunk_ids)
                 
-                current_time += 1.0
-                
-                # Global State Update
+                # 1. Update Global State
                 system.bdh.reset_state()
-                system.bdh.set_state(global_state.detach().clone().to(system.device))
-                system.bdh(tokens, use_state=True)
-                global_state = system.bdh.get_state().cpu()
-                global_timestamp = current_time
+                for layer_idx, block in enumerate(system.bdh.transformer.h):
+                    block.attn.state.copy_(global_state[layer_idx].to(system.device))
                 
+                system.bdh(tokens, use_state=True)
+                global_state = get_full_state(system.bdh)
+                
+                # 2. Update Mentioned Entities
                 chunk_lower = chunk_text.lower()
                 mentioned_entities = [e for e in entities if e.lower() in chunk_lower]
-                chunk_emb = global_state
                 
-                # Save sentence-level evidence
-                if mentioned_entities:
-                    # Simple sentence splitting on the decoded text
-                    sentences = [s.strip() for s in chunk_text.replace('?', '.').replace('!', '.').split('.') if len(s.split()) > 4]
-                    for sent in sentences:
-                        sent_lower = sent.lower()
-                        for entity in mentioned_entities:
-                            if entity.lower() in sent_lower:
-                                # Encode sentence as evidence
-                                with torch.no_grad():
-                                    # Encode sentence with BPE
-                                    sent_ids = system.tokenizer.encode(sent)
-                                    sent_tokens = torch.tensor([sent_ids], dtype=torch.long, device=system.device)
-                                    
-                                    if sent_tokens.size(1) > 0:
-                                        system.bdh.reset_state()
-                                        e_seq = system.bdh(sent_tokens, use_state=False, return_embeddings=True)
-                                        sent_vec = e_seq.mean(dim=1).cpu() # [1, D]
-                                        
-                                        if len(entity_memories[entity]) < 200:
-                                            entity_memories[entity].append((sent_vec, sent))
-
-                # Entity State Updates
                 for entity in mentioned_entities:
-                    old_state = entity_states[entity].detach().clone()
-                    
                     system.bdh.reset_state()
-                    system.bdh.set_state(old_state.to(system.device))
+                    # Load Entity Private State
+                    for layer_idx, block in enumerate(system.bdh.transformer.h):
+                        block.attn.state.copy_(entity_states[entity][layer_idx].to(system.device))
+                    
+                    # Update with new chunk
                     system.bdh(tokens, use_state=True)
-                    new_state = system.bdh.get_state().cpu()
-                    
-                    gate = write_gate(
-                        old_state.to(system.device), 
-                        chunk_emb.to(system.device), 
-                        global_state.to(system.device)
-                    ).item()
-                    
-                    update = new_state - old_state
-                    entity_states[entity] = old_state + gate * update
-                    entity_timestamps[entity] = current_time
-                    
-                    entity_update_counts[entity] += 1
-                    gate_values[entity].append(gate)
+                    entity_states[entity] = get_full_state(system.bdh)
                 
                 pbar.update(1)
     
     world_state = WorldState(
-        global_state=global_state.detach(),
-        entity_states={k: v.detach() for k, v in entity_states.items()},
+        global_state=global_state,
+        entity_states=entity_states,
         known_entities=entities
     )
     world_state.entity_memories = entity_memories
-    world_state.entity_timestamps = entity_timestamps
-    world_state.global_timestamp = global_timestamp
-    
     return world_state

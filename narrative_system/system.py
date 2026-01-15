@@ -88,39 +88,37 @@ class NarrativeConsistencySystem:
             print(f"❌ Failed to load tiktoken: {e}")
             raise
 
-        self.config = BDHConfig(n_layer=6, n_embd=EMBEDDING_DIM, n_head=4, vocab_size=vocab_size)
-        self.bdh = BDH(self.config).to(self.device)
+        # Initialize GPT2-BDH Transformer (Unified Architecture)
+        from bdh_transformer import GPT2BDHTransformer
+        from dataclasses import dataclass
+        
+        @dataclass
+        class Config:
+            n_layer: int = 6
+            n_embd: int = EMBEDDING_DIM
+            n_head: int = 4
+            vocab_size: int = vocab_size
+            block_size: int = 1024
+            dropout: float = 0.1
+            
+        self.config = Config()
+        self.bdh = GPT2BDHTransformer(self.config).to(self.device)
         self.bdh.eval()
         
-        # Classifier removed - we use direct Energy Inference
-        self.classifier = None
-                
-        bdh_path = os.path.join(self.model_dir, "bdh_base.pt")
+        # Load weights if exist
+        bdh_path = os.path.join(self.model_dir, "bdh_transformer.pt")
         if os.path.exists(bdh_path):
              try:
-                 # Strict=False to allow shape mismatch if we are reloading old weights (though they won't work well)
-                 # Actually, shape mismatch on Embedding will error out even with strict=False usually unless filtered.
-                 # Ideally we should ignore mismatch keys.
-                 state_dict = torch.load(bdh_path, map_location=self.device, weights_only=False)
-                 if state_dict['embed.weight'].shape[0] != vocab_size:
-                     print("⚠️  Vocab size mismatch (Old model). Starting fresh.")
-                 else:
-                     self.bdh.load_state_dict(state_dict, strict=False)
-             except Exception as e:
-                 print(f"⚠️  Weight load error: {e}")
-        else:
-             print(f"⚠️  BDH BASE NOT FOUND: {bdh_path}")
+                 self.bdh.load_state_dict(torch.load(bdh_path, map_location=self.device, weights_only=False), strict=False)
+                 print("✅ Transformer weights loaded.")
+             except Exception:
+                 print("⚠️ Weights found but incompatible. Starting fresh.")
 
-        # Import and initialize sentence analyzer
-        from sentence_analyzer import SentenceAnalyzer
-        self.sentence_analyzer = SentenceAnalyzer(self.bdh, EMBEDDING_DIM, self.device)
-
-        # Better State Merging
-        from .world_state import AdaptiveMerge
-        self.adaptive_merge = AdaptiveMerge(EMBEDDING_DIM).to(self.device).eval()
-
-        self.backstory_store = {}
-        self.backstory_states = {} # Map (book, char) -> Tensor State
+        # Unified Checker
+        from .linkage_check import NarrativeLinkageChecker
+        self.checker = NarrativeLinkageChecker(self.bdh, self.tokenizer, self.device)
+        
+        self.backstory_states = {} # Map (book, char) -> List of Layer States
         print("--> Initialization complete")
 
     def encode_text(self, text_list, distinct_states=None):

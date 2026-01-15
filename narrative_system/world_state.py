@@ -22,16 +22,9 @@ class WorldState:
     entity_timestamps: Dict[str, float] = field(default_factory=dict)
     global_timestamp: float = 0.0
     
-    def get_query_state(self, entity: str, alpha: float = 0.3) -> torch.Tensor:
+    def get_query_state(self, entity: str, alpha: float = 0.3) -> list:
         """
-        Merge global and entity state for inference.
-        
-        Args:
-            entity: Character name to query
-            alpha: Weight for global state (0.3 = 30% global, 70% entity)
-        
-        Returns:
-            Combined state tensor
+        Merge global and entity state per layer.
         """
         if entity not in self.entity_states:
             return self.global_state  # Fallback to global
@@ -40,8 +33,10 @@ class WorldState:
         if self.global_state is None:
             return entity_s
             
-        # Linear interpolation
-        return alpha * self.global_state + (1 - alpha) * entity_s
+        merged = []
+        for g, e in zip(self.global_state, entity_s):
+            merged.append(alpha * g + (1 - alpha) * e)
+        return merged
 
 
 class EntityWriteGate(nn.Module):

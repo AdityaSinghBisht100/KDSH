@@ -99,38 +99,25 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
         
         optimizer.zero_grad()
         
-        # 1. Compute Energy with context
-        energy_context = checker.compute_energy(content, world_state)
+        # In GPT-2 style training, we train on the context chunks
+        # to maximize the likelihood of the text.
+        # This makes the PMI check effective because the model will recognize "known" facts.
         
-        # 2. Compute Energy WITHOUT context (Reset State)
-        energy_base = checker.compute_energy(content, None)
+        tokens = torch.tensor([system.tokenizer.encode(content)], device=system.device)
+        targets = tokens.clone()
         
-        # 3. Compute Differential Energy Loss
-        # We want: 
-        # - Consistent: context_energy < base_energy (Negative Delta)
-        # - Contradict: context_energy > base_energy (Positive Delta)
+        logits, loss = system.bdh(tokens, targets=targets, use_state=True)
         
-        if is_contradict:
-            # PUSH: make context energy MUCH LARGER than base energy
-            # Loss = clamp(margin + base - context, min=0)
-            loss = torch.clamp(0.1 + energy_base - energy_context, min=0)
-        else:
-            # PULL: make context energy MUCH SMALLER than base energy
-            # Loss = clamp(margin + context - base, min=0)
-            loss = torch.clamp(0.1 + energy_context - energy_base, min=0)
-        
-        # Backward and step per sample to free memory immediately
+        # Backward and step
         loss.backward()
-        
-        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(system.bdh.parameters(), max_norm=1.0)
-        
         optimizer.step()
+        
         total_loss += loss.item()
         
-        # Free memory aggressively
-        del energy_context, energy_base, loss
-        if idx % 5 == 0:
+        # Cleanup
+        del logits, loss
+        if idx % 10 == 0:
             torch.cuda.empty_cache()
             
         pbar.update(1)
