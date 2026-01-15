@@ -144,6 +144,15 @@ class GPT2BDHTransformer(nn.Module):
         for block in self.transformer.h:
             block.attn.reset_state()
 
+    def get_state(self):
+        """Return list of [nh, dk, dv] tensors for each layer."""
+        return [block.attn.state.clone() for block in self.transformer.h]
+        
+    def set_state(self, state_list):
+        """Load list of states into layers."""
+        for i, block in enumerate(self.transformer.h):
+            block.attn.state.copy_(state_list[i])
+
     def forward(self, idx, targets=None, use_state=False):
         device = idx.device
         b, t = idx.size()
