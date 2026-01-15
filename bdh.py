@@ -15,7 +15,7 @@ class BDHConfig:
     n_embd: int = 256
     dropout: float = 0.1
     n_head: int = 4
-    mlp_internal_dim_multiplier: int = 128 # MAX FIDELITY: 128 (Requires Gradient Checkpointing)
+    mlp_internal_dim_multiplier: int = 128
     vocab_size: int = 50257
     # Temporal conditioning parameters
     temporal_dim: int = 64       # Temporal embedding dimension
@@ -54,7 +54,7 @@ class LinearAttention(nn.Module):
         
         # Initial State: [Layers, Heads, Key_Dim (N), Value_Dim (D)]
         # Key_Dim = head_dim (from MLP multiplier), Value_Dim = D (from embedding)
-        self.register_buffer("state", torch.zeros(n_layer, nh, head_dim, D))
+        self.register_buffer("state", torch.zeros(config.n_layer, nh, head_dim, D))
         
     def reset_state(self):
         self.state.zero_()
@@ -92,9 +92,13 @@ class LinearAttention(nn.Module):
                 # Note: This update isn't autograd-friendly for BPTT in this specific in-place form.
                 # But perfect for Inference.
                 if B == 1:
-                     curr_state = self.alpha * curr_state + kv.squeeze(0)
-                     self.state[layer_idx] = curr_state
-                     state_for_attn = curr_state.unsqueeze(0) # [1, nh, d, d]
+                     # Recurrent Update
+                     # curr_state is B, nh, head_dim, D
+                     curr_state = (1 - erase) * (α_t * curr_state) + write * kv
+                     # Update the buffer (detached to prevent backprop through history if not desired)
+                     # For the dragon, we typically want persistence but for training consistency we update the buffer
+                     self.state.copy_(curr_state.detach().squeeze(0))
+                     state_for_attn = curr_state 
                 else:
                      # Fallback for batching without persistent state logic
                      # (Just behave like local attention or requires expanded state tensor)
@@ -113,11 +117,29 @@ class LinearAttention(nn.Module):
              return self.standard_attn(Q, K, V)
              
     def standard_attn(self, Q, K, V):
-        # Fallback to standard for parallel training speed if linear scan is too slow in python
-        scores = (Q @ K.transpose(-2, -1)) * (1.0 / math.sqrt(K.size(-1)))
-        scores = scores.tril(diagonal=0)
-        scores = F.softmax(scores, dim=-1)
-        return scores @ V
+        """
+        True Parallel Causal Linear Attention.
+        O(T) memory and time.
+        No O(T^2) K,V cache.
+        """
+        # Q: [B, nh, T, head_dim]
+        # K: [B, nh, T, head_dim] 
+        # V: [B, nh, T, d]
+        
+        # 1. Compute Outer Product Sequence: K^T * V
+        # [B, nh, T, head_dim, 1] * [B, nh, T, 1, d] -> [B, nh, T, head_dim, d]
+        # Note: head_dim is N (from multiplier). 
+        # Memory per token: N * d * 4 bytes.
+        kv = K.unsqueeze(-1) * V.unsqueeze(-2)
+        
+        # 2. Cumulative Sum (Causal History)
+        s = torch.cumsum(kv, dim=2)
+        
+        # 3. Apply Query: O = Q * S
+        # [B, nh, T, 1, head_dim] @ [B, nh, T, head_dim, d] -> [B, nh, T, 1, d]
+        out = torch.matmul(Q.unsqueeze(-2), s).squeeze(-2)
+        
+        return out
         
     def query_state(self, Q, state, layer_idx=0):
         """
@@ -223,8 +245,8 @@ class TemporalLinearAttention(LinearAttention):
         return decay.clamp(0.01, 1.0)  # Never fully forget
     
     def forward(self, Q, K, V, use_state=False, layer_idx=0, return_new_state=False, initial_state=None):
-        # MAX FIDELITY MODE: Use Gradient Checkpointing to fit large state in VRAM
-        if self.training and return_new_state and Q.requires_grad: 
+        # Memory Fix: Enable checkpointing for ANY training pass that requires gradients.
+        if self.training and Q.requires_grad:
              def custom_forward(q, k, v, init_state):
                  return self.forward_temporal(q, k, v, 0, 0, use_state, layer_idx, return_new_state, init_state)
              

@@ -130,7 +130,7 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
         
         # Free memory aggressively
         del energy_context, energy_base, loss
-        if idx % 10 == 0:
+        if idx % 5 == 0:
             torch.cuda.empty_cache()
             
         pbar.update(1)
