@@ -39,7 +39,8 @@ env/
 *.pth
 *.ckpt
 checkpoints/
-#models/
+models/
+deepseek/
 *.onnx
 *.bin
 
