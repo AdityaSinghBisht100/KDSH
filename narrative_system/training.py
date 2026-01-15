@@ -29,11 +29,7 @@ def train(system, epochs=20):
     ingest_novel_knowledge(system, combined, test_mode=False)
     
     print("\n=== Phase 2: Supervised Training (train.csv) ===")
-    print("Training BDH to minimize energy for consistent statements...")
-    
-    # Initialize implementation of Energy Loss
-    # Margin 0.3 means we want Gap > 0.3
-    loss_fn = ContrastiveEnergyLoss(margin=0.5).to(system.device)
+    print("Training BDH with Multi-Task (Causal + Semantic) Objective...")
     
     # Initialize Optimizer ONCE to preserve momentum across epochs
     optimizer = torch.optim.Adam(
@@ -42,7 +38,7 @@ def train(system, epochs=20):
     )
     
     for epoch in range(epochs):
-            train_loss = run_training_step(system, train_df, loss_fn, optimizer)
+            train_loss = run_training_step(system, train_df, optimizer)
             metrics = evaluate_accuracy(system, test_df)
             
             print(f"\n--- Epoch {epoch+1}/{epochs} Summary ---")
@@ -66,7 +62,7 @@ def train(system, epochs=20):
     print(f"Final Accuracy: {final_metrics['accuracy']:.2%}")
     print(f"Final F1-Score: {final_metrics['f1']:.4f}")
 
-def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
+def run_training_step(system, train_df, optimizer):
     system.bdh.train()
     
     total_loss = 0
