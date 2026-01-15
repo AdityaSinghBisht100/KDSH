@@ -115,7 +115,18 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
         tokens = torch.tensor([tokens_list], device=system.device)
         targets = tokens.clone()
         
-        logits, loss = system.bdh(tokens, targets=targets, use_state=True)
+        # Binary Label for Semantic Supervision
+        # 1.0 for consistent, 0.0 for contradict
+        y_label = torch.tensor([[1.0 if not is_contradict else 0.0]], device=system.device)
+        
+        logits, loss_causal, _, linkage_logit = system.bdh(tokens, targets=targets, use_state=True)
+        
+        # Semantic Loss (Binary Cross Entropy)
+        # This trains the 'Semantic Meaning' head directly from your examples
+        loss_semantic = F.binary_cross_entropy_with_logits(linkage_logit, y_label)
+        
+        # Total Unified Loss
+        loss = 0.5 * loss_causal + 0.5 * loss_semantic
         
         # Backward and step
         loss.backward()
@@ -125,7 +136,7 @@ def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
         total_loss += loss.item()
         
         # Cleanup
-        del logits, loss
+        del logits, loss, loss_causal, loss_semantic
         if idx % 10 == 0:
             torch.cuda.empty_cache()
             

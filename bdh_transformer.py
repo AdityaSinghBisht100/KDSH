@@ -128,6 +128,16 @@ class GPT2BDHTransformer(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
+        # Semantic Pooling Head: Compresses sequence into Meaning Vector
+        self.semantic_head = nn.Sequential(
+            nn.Linear(config.n_embd, config.n_embd),
+            nn.Tanh(),
+            nn.Linear(config.n_embd, config.n_embd) 
+        )
+        
+        # Binary Classifier: Takes Semantic Vector -> Consistent (1) or Contradict (0)
+        self.classifier_head = nn.Linear(config.n_embd, 1)
+        
         # Weight sharing as per GPT-2
         self.transformer.wte.weight = self.lm_head.weight
         self.apply(self._init_weights)
@@ -153,6 +163,15 @@ class GPT2BDHTransformer(nn.Module):
         for i, block in enumerate(self.transformer.h):
             block.attn.state.copy_(state_list[i])
 
+    def get_semantic_embedding(self, idx, use_state=True):
+        """
+        Extract the Semantic Meaning Vector for a sequence.
+        """
+        self.eval()
+        with torch.no_grad():
+            _, _, semantic_vec = self.forward(idx, use_state=use_state)
+        return semantic_vec
+
     def forward(self, idx, targets=None, use_state=False):
         device = idx.device
         b, t = idx.size()
@@ -171,8 +190,15 @@ class GPT2BDHTransformer(nn.Module):
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
         
+        # 4. Semantic Pooling: Use the hidden state of the LAST token
+        # z_semantic: [Batch, Embedding_Dim]
+        z_semantic = self.semantic_head(x[:, -1, :])
+        
+        # 5. Consistency Logit: Direct prediction of Linkage
+        linkage_logit = self.classifier_head(z_semantic)
+        
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
             
-        return logits, loss
+        return logits, loss, z_semantic, linkage_logit

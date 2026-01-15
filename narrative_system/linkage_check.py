@@ -33,43 +33,46 @@ class NarrativeLinkageChecker:
             self.model.reset_state()
             
         with torch.no_grad():
-            logits, _ = self.model(tokens, use_state=True)
+            logits, _, _, linkage_logit = self.model(tokens, use_state=True)
             
-        # 3. Calculate mean log-softman for targets
-        # logits shape: [1, T, Vocab]
+        # 3. Calculate mean log-probs
         log_probs = F.log_softmax(logits, dim=-1)
-        
-        # Gather the log-probs for the target tokens
-        # Shifted by 1 for causal prediction
         targets = targets[:, 1:].unsqueeze(-1)
         log_probs = log_probs[:, :-1, :]
         
         gathered = torch.gather(log_probs, -1, targets).squeeze(-1)
-        return gathered.mean().item()
+        return gathered.mean().item(), linkage_logit
 
     def check_linkage(self, statement, backstory_state=None):
         """
-        Main decision function.
-        Returns: ("linked"|"unlinked", confidence_score)
+        Decision function using Hybrid PMI + Semantic logic.
         """
         # P(Statement | Backstory)
         if backstory_state is not None:
-             # Load state into model before checking
              for i, block in enumerate(self.model.transformer.h):
                  if backstory_state[i].shape != block.attn.state.shape:
-                      continue # Skip incompatible states or handle error
+                      continue
                  block.attn.state.copy_(backstory_state[i].to(self.device))
         
-        lp_conditional = self.compute_log_likelihood(statement, use_backstory=True)
+        lp_conditional, linkage_logit = self.compute_log_likelihood(statement, use_backstory=True)
         
         # P(Statement | Empty)
-        lp_marginal = self.compute_log_likelihood(statement, use_backstory=False)
+        lp_marginal, _ = self.compute_log_likelihood(statement, use_backstory=False)
         
         # PMI = Conditional - Marginal
         pmi = lp_conditional - lp_marginal
         
-        # Decision: If the backstory helps predict the statement (Higher PMI), it is linked.
-        # Threshold 0.0 means any improvement in probability counts.
-        label = "consistent" if pmi > 0 else "contradict"
+        # Semantic Prob from Classifier
+        semantic_prob = torch.sigmoid(linkage_logit).item()
         
-        return label, pmi
+        # Fusion Decision:
+        # We trust the semantic classifier but use PMI as a sanity check.
+        # A statement is consistent if it's semantically likely AND logically plausible.
+        is_consistent = (semantic_prob > 0.5) and (pmi > -0.5) 
+        
+        label = "consistent" if is_consistent else "contradict"
+        
+        # Return a score that balances probabilistic and semantic confidence
+        confidence = 0.5 * semantic_prob + 0.5 * (1.0 if pmi > 0 else 0.0)
+        
+        return label, confidence

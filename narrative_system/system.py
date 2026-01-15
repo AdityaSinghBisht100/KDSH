@@ -175,9 +175,9 @@ class NarrativeConsistencySystem:
                   row = padded[i:i+1] # [1, T]
                   
                   with torch.no_grad():
-                      e_seq = self.bdh(row, use_state=True, return_embeddings=True)
-                      e = e_seq.mean(dim=1) # [1, D]
-                      sent_embs.append(e)
+                      # New 4-value return from GPT2BDHTransformer
+                      _, _, z_semantic, _ = self.bdh(row, use_state=True)
+                      sent_embs.append(z_semantic)
              sent_emb = torch.cat(sent_embs, dim=0)
 
         return sent_emb
