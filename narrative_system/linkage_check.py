@@ -1,3 +1,6 @@
+import torch
+import torch.nn.functional as F
+
 class NarrativeLinkageChecker:
     """
     Semantic-Principled Linkage detection.
