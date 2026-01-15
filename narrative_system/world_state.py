@@ -105,9 +105,10 @@ class AdaptiveMerge(nn.Module):
     """
     def __init__(self, state_dim: int, proj_dim: int = 64):
         super().__init__()
-        # Uses mean + std = 2x features
+        # Uses mean + std = 2x features (total features = proj_dim)
+        # 3 inputs (statement, global, entity) -> proj_dim * 3
         self.alpha_mlp = nn.Sequential(
-            nn.Linear(proj_dim * 6, 64),  # 3 inputs * 2 (mean+std)
+            nn.Linear(proj_dim * 3, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
             nn.Sigmoid()
