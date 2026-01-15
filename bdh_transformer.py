@@ -47,18 +47,20 @@ class BDHAttention(nn.Module):
             s_seq = torch.cumsum(kv, dim=2) # [B, nh, T, dk, dv]
             
             # Apply Initial State if any
+            # self.state is [nh, dk, dv], adding it to [B, nh, T, dk, dv]
             s_seq = s_seq + self.state.view(1, self.n_head, 1, head_dim, head_dim)
             
             y = torch.matmul(q.unsqueeze(-2), s_seq).squeeze(-2) # [B, nh, T, dv]
             
-            # Update the persistent buffer for ingestion logic (detach to keep graph clean)
+            # Update the persistent buffer
             with torch.no_grad():
+                # We update with the state of the LAST token of the FIRST batch item
                 self.state.copy_(s_seq[0, :, -1].detach())
                 
         elif use_state:
             # Recurrent Mode (Inference/Ingestion)
             out = []
-            curr_state = self.state
+            curr_state = self.state.unsqueeze(0).expand(B, -1, -1, -1).clone() # [B, nh, dk, dv]
             for t in range(T):
                 q_t = q[:, :, t, :].unsqueeze(-2) # [B, nh, 1, dk]
                 k_t = k[:, :, t, :].unsqueeze(-1) # [B, nh, dk, 1]
@@ -72,7 +74,9 @@ class BDHAttention(nn.Module):
                 out.append(y_t.squeeze(-2))
             
             y = torch.stack(out, dim=2)
-            self.state = curr_state.detach()
+            # Update core memory state with the final state of the first sequence in batch
+            with torch.no_grad():
+                self.state.copy_(curr_state[0].detach())
             
         else:
             # Standard Attention behavior if no state is used
@@ -155,9 +159,12 @@ class GPT2BDHTransformer(nn.Module):
         return [block.attn.state.clone() for block in self.transformer.h]
         
     def set_state(self, state_list):
-        """Load list of states into layers."""
+        """Load list of states into layers. Handles [nh, d, d] or [1, nh, d, d]."""
         for i, block in enumerate(self.transformer.h):
-            block.attn.state.copy_(state_list[i])
+            s = state_list[i]
+            if s.dim() == 4 and s.size(0) == 1:
+                s = s.squeeze(0)
+            block.attn.state.copy_(s)
 
     def forward(self, vecs, targets=None, use_state=False):
         """

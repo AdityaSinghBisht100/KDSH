@@ -112,7 +112,7 @@ def run_training_step(system, train_df, optimizer):
         total_loss += loss.item()
         
         # Cleanup
-        del logits, loss, loss_causal, loss_semantic
+        del loss
         if idx % 10 == 0:
             torch.cuda.empty_cache()
             
