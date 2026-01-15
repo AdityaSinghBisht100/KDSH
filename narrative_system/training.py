@@ -1,12 +1,14 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import pandas as pd
 from tqdm import tqdm
 from .ingestion import ingest_novel_knowledge
-from .consistency import ContrastiveEnergyLoss, CounterfactualChecker
 
 def train(system, epochs=20):
+    from .system import set_seed
+    set_seed(42)
     print(f"Starting Training on {system.device}...")
     system._initialize_components()
     
@@ -54,8 +56,10 @@ def train(system, epochs=20):
             print(f"  [TN: {cm['tn']}, FP: {cm['fp']}]")
             print(f"  [FN: {cm['fn']}, TP: {cm['tp']}]")
             
-            # Save only BDH, as we have no classifier head
-            torch.save(system.bdh.state_dict(), os.path.join(system.model_dir, "bdh_base.pt"))
+            # Save unified architecture weights
+            save_path = os.path.join(system.model_dir, "bdh_transformer.pt")
+            torch.save(system.bdh.state_dict(), save_path)
+            print(f"  💾 Model checkpoint saved to {save_path}")
             
     print("\n=== Training Complete ===")
     final_metrics = evaluate_accuracy(system, test_df)
@@ -64,13 +68,6 @@ def train(system, epochs=20):
 
 def run_training_step(system, train_df, loss_fn, optimizer, batch_size=4):
     system.bdh.train()
-    
-    # Optimizer is now passed in
-    
-    # Initialize consistency checker with BPE tokenizer
-    
-    # Initialize consistency checker with BPE tokenizer
-    checker = CounterfactualChecker(system.bdh, system.tokenizer, system.device)
     
     total_loss = 0
     num_samples = len(train_df)

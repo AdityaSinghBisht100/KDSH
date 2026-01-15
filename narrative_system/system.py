@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 import sys
 import os
+import random
+import tiktoken
 
 from pathlib import Path
 from typing import List, Dict, Tuple
@@ -13,6 +15,14 @@ from tqdm import tqdm
 from .world_state import WorldState, EntityWriteGate, AdaptiveMerge
 from .consistency import CounterfactualChecker, ContrastiveEnergyLoss, SURPRISE_MAX
 from .models import NarrativeDataset
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # Fix for import resolution
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +111,7 @@ class NarrativeConsistencySystem:
             block_size: int = 1024
             dropout: float = 0.1
             
+        set_seed(42)
         self.config = Config()
         self.bdh = GPT2BDHTransformer(self.config).to(self.device)
         self.bdh.eval()
