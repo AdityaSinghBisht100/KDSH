@@ -1,6 +1,12 @@
-# main.py
 import argparse
 import os
+import sys
+
+# Add the parent directory to sys.path to allow absolute imports from the 'deepseek' package
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
 def main():
     parser = argparse.ArgumentParser(description="BDH Narrative Consistency System")
@@ -17,13 +23,13 @@ def main():
     
     if args.mode in ["train", "both"]:
         print("=== Training ===")
-        from train import train_model
-        train_model()
+        from deepseek.train import train
+        train()
     
     if args.mode in ["inference", "both"]:
         print("\n=== Inference ===")
-        from inference import main as inference_main
-        inference_main()
+        from deepseek.inference import run_inference
+        run_inference()
     
     print("\n=== Complete ===")
 

@@ -1,8 +1,17 @@
 import torch
 import torch.optim as optim
+import os
+import sys
+
+# Ensure parent directory is in sys.path for absolute imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 from deepseek.config import config
 from deepseek.models.bdh_encoder import BDHTextEncoder
-from deepseek.models.consistency_classifier.py import ConsistencyClassifier
+from deepseek.models.consistency_classifier import ConsistencyClassifier
 from deepseek.processing.data_loader import DataLoader
 from deepseek.processing.text_processor import TextProcessor
 
