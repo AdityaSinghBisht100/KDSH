@@ -40,6 +40,7 @@ env/
 *.ckpt
 checkpoints/
 models/
+deepseek/
 *.onnx
 *.bin
 
