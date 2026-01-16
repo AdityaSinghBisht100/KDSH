@@ -1,62 +1,62 @@
 id,prediction,rationale
-95,0,Perplexity: 130.62. High (surprising).
-136,1,Perplexity: 96.41. Low (expected).
-59,1,Perplexity: 89.03. Low (expected).
-60,0,Perplexity: 115.80. High (surprising).
-124,1,Perplexity: 45.24. Low (expected).
-111,1,Perplexity: 76.68. Low (expected).
-135,0,Perplexity: 117.61. High (surprising).
+95,0,"PplDiff: 0.00 (With: 4884.34, Without: 4884.34)"
+136,0,"PplDiff: 0.00 (With: 1374.72, Without: 1374.72)"
+59,0,"PplDiff: 0.00 (With: 1428.31, Without: 1428.31)"
+60,0,"PplDiff: 0.00 (With: 2342.61, Without: 2342.61)"
+124,0,"PplDiff: 0.00 (With: 208.84, Without: 208.84)"
+111,0,"PplDiff: 0.00 (With: 804.59, Without: 804.59)"
+135,0,"PplDiff: 0.00 (With: 2310.50, Without: 2310.50)"
 27,1,No backstory found
-110,1,Perplexity: 85.96. Low (expected).
+110,0,"PplDiff: 0.00 (With: 944.34, Without: 944.34)"
 42,1,No backstory found
-56,1,Perplexity: 87.97. Low (expected).
-80,0,Perplexity: 169.34. High (surprising).
+56,0,"PplDiff: 0.00 (With: 1389.88, Without: 1389.88)"
+80,0,"PplDiff: 0.00 (With: 8153.31, Without: 8153.31)"
 28,1,No backstory found
-101,1,Perplexity: 79.11. Low (expected).
-91,0,Perplexity: 115.00. High (surprising).
-24,1,Perplexity: 100.19. Low (expected).
-119,1,Perplexity: 104.99. Low (expected).
-93,0,Perplexity: 122.36. High (surprising).
-72,1,Perplexity: 86.99. Low (expected).
-16,1,Perplexity: 95.63. Low (expected).
+101,0,"PplDiff: 0.00 (With: 826.32, Without: 826.32)"
+91,0,"PplDiff: 0.00 (With: 3060.49, Without: 3060.49)"
+24,0,"PplDiff: 0.00 (With: 1846.00, Without: 1846.00)"
+119,0,"PplDiff: 0.00 (With: 2055.54, Without: 2055.54)"
+93,0,"PplDiff: 0.00 (With: 3425.52, Without: 3425.52)"
+72,0,"PplDiff: 0.00 (With: 965.45, Without: 965.45)"
+16,0,"PplDiff: 0.00 (With: 1195.86, Without: 1195.86)"
 30,1,No backstory found
-97,0,Perplexity: 123.18. High (surprising).
-22,0,Perplexity: 157.58. High (surprising).
-53,0,Perplexity: 116.59. High (surprising).
-58,1,Perplexity: 86.56. Low (expected).
-81,0,Perplexity: 146.37. High (surprising).
-47,1,Perplexity: 90.17. Low (expected).
-7,0,Perplexity: 120.26. High (surprising).
-121,0,Perplexity: 113.60. High (surprising).
-129,1,Perplexity: 84.19. Low (expected).
-51,1,Perplexity: 102.97. Low (expected).
-127,1,Perplexity: 99.54. Low (expected).
-133,1,Perplexity: 82.89. Low (expected).
-52,1,Perplexity: 84.84. Low (expected).
-114,1,Perplexity: 104.16. Low (expected).
-2,0,Perplexity: 130.50. High (surprising).
+97,0,"PplDiff: 0.00 (With: 2075.45, Without: 2075.45)"
+22,0,"PplDiff: 0.00 (With: 5996.56, Without: 5996.56)"
+53,0,"PplDiff: 0.00 (With: 2636.76, Without: 2636.76)"
+58,0,"PplDiff: 0.00 (With: 1089.56, Without: 1089.56)"
+81,0,"PplDiff: 0.00 (With: 6337.61, Without: 6337.61)"
+47,0,"PplDiff: 0.00 (With: 1455.92, Without: 1455.92)"
+7,0,"PplDiff: 0.00 (With: 3016.25, Without: 3016.25)"
+121,0,"PplDiff: 0.00 (With: 2454.12, Without: 2454.12)"
+129,0,"PplDiff: 0.00 (With: 872.88, Without: 872.88)"
+51,0,"PplDiff: 0.00 (With: 1894.64, Without: 1894.64)"
+127,0,"PplDiff: 0.00 (With: 2023.90, Without: 2023.90)"
+133,0,"PplDiff: 0.00 (With: 752.21, Without: 752.21)"
+52,0,"PplDiff: 0.00 (With: 1188.57, Without: 1188.57)"
+114,0,"PplDiff: 0.00 (With: 1845.06, Without: 1845.06)"
+2,0,"PplDiff: 0.00 (With: 3780.62, Without: 3780.62)"
 33,1,No backstory found
-15,1,Perplexity: 100.92. Low (expected).
-82,0,Perplexity: 160.89. High (surprising).
+15,0,"PplDiff: 0.00 (With: 1361.02, Without: 1361.02)"
+82,0,"PplDiff: 0.00 (With: 6975.86, Without: 6975.86)"
 37,1,No backstory found
-3,1,Perplexity: 74.88. Low (expected).
-103,1,Perplexity: 91.68. Low (expected).
-94,1,Perplexity: 103.51. Low (expected).
-85,1,Perplexity: 77.81. Low (expected).
-21,0,Perplexity: 122.65. High (surprising).
-49,1,Perplexity: 69.58. Low (expected).
-140,1,Perplexity: 71.37. Low (expected).
-64,1,Perplexity: 99.31. Low (expected).
-131,1,Perplexity: 82.99. Low (expected).
-61,1,Perplexity: 79.27. Low (expected).
-86,0,Perplexity: 112.92. High (surprising).
+3,0,"PplDiff: 0.00 (With: 926.78, Without: 926.78)"
+103,0,"PplDiff: 0.00 (With: 1105.45, Without: 1105.45)"
+94,0,"PplDiff: 0.00 (With: 2429.34, Without: 2429.34)"
+85,0,"PplDiff: 0.00 (With: 1097.54, Without: 1097.54)"
+21,0,"PplDiff: 0.00 (With: 2438.16, Without: 2438.16)"
+49,0,"PplDiff: 0.00 (With: 768.62, Without: 768.62)"
+140,0,"PplDiff: 0.00 (With: 587.74, Without: 587.74)"
+64,0,"PplDiff: 0.00 (With: 1549.22, Without: 1549.22)"
+131,0,"PplDiff: 0.00 (With: 817.28, Without: 817.28)"
+61,0,"PplDiff: 0.00 (With: 731.22, Without: 731.22)"
+86,0,"PplDiff: 0.00 (With: 2800.58, Without: 2800.58)"
 38,1,No backstory found
-132,1,Perplexity: 96.11. Low (expected).
-77,0,Perplexity: 118.13. High (surprising).
-70,0,Perplexity: 174.19. High (surprising).
-115,1,Perplexity: 103.16. Low (expected).
-78,0,Perplexity: 163.19. High (surprising).
-87,0,Perplexity: 139.94. High (surprising).
-75,0,Perplexity: 131.71. High (surprising).
+132,0,"PplDiff: 0.00 (With: 1564.71, Without: 1564.71)"
+77,0,"PplDiff: 0.00 (With: 2851.82, Without: 2851.82)"
+70,0,"PplDiff: 0.00 (With: 9250.33, Without: 9250.33)"
+115,0,"PplDiff: 0.00 (With: 1730.58, Without: 1730.58)"
+78,0,"PplDiff: 0.00 (With: 8243.36, Without: 8243.36)"
+87,0,"PplDiff: 0.00 (With: 3758.52, Without: 3758.52)"
+75,0,"PplDiff: 0.00 (With: 3671.36, Without: 3671.36)"
 44,1,No backstory found
-1000,0,Perplexity: 525.44. High (surprising).
+1000,0,"PplDiff: 0.00 (With: 24.17, Without: 24.17)"

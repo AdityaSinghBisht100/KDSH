@@ -21,45 +21,21 @@ class ByteTokenizer:
         self.pad_token_id = 0  # NULL byte
         self.eos_token_id = 3  # ETX (end of text)
         self.bos_token_id = 2  # STX (start of text)
+        print("Using Byte-Level Tokenizer (vocab=256)")
     
     def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
-        """
-        Encode text to byte tokens.
-        
-        Args:
-            text: Input string
-            add_special_tokens: Whether to add BOS/EOS
-        
-        Returns:
-            List of byte values (0-255)
-        """
-        # Convert to bytes
+        """Encode text to byte tokens (0-255)."""
         byte_list = list(text.encode('utf-8', errors='replace'))
-        
-        # Add special tokens
         if add_special_tokens:
             byte_list = [self.bos_token_id] + byte_list + [self.eos_token_id]
-        
         return byte_list
     
     def decode(self, token_ids: List[int], skip_special_tokens: bool = True) -> str:
-        """
-        Decode byte tokens back to text.
-        
-        Args:
-            token_ids: List of byte values
-            skip_special_tokens: Whether to skip BOS/EOS/PAD
-        
-        Returns:
-            Decoded string
-        """
+        """Decode byte tokens back to text."""
         if skip_special_tokens:
             token_ids = [t for t in token_ids 
                         if t not in (self.pad_token_id, self.bos_token_id, self.eos_token_id)]
-        
-        # Convert to bytes and decode
-        byte_array = bytes(token_ids)
-        return byte_array.decode('utf-8', errors='replace')
+        return bytes(token_ids).decode('utf-8', errors='replace')
     
     def __call__(
         self, 
@@ -69,32 +45,17 @@ class ByteTokenizer:
         max_length: int = None,
         truncation: bool = False
     ) -> dict:
-        """
-        Tokenize text(s).
-        
-        Args:
-            text: Single string or list of strings
-            return_tensors: 'pt' for PyTorch tensors
-            padding: Whether to pad to max length
-            max_length: Maximum sequence length
-            truncation: Whether to truncate
-        
-        Returns:
-            Dictionary with 'input_ids' and optionally 'attention_mask'
-        """
+        """Tokenize text(s)."""
         if isinstance(text, str):
             texts = [text]
         else:
             texts = text
         
-        # Encode all texts
         all_ids = [self.encode(t) for t in texts]
         
-        # Truncation
         if truncation and max_length:
             all_ids = [ids[:max_length] for ids in all_ids]
         
-        # Padding
         if padding:
             max_len = max(len(ids) for ids in all_ids)
             if max_length:
@@ -117,7 +78,6 @@ class ByteTokenizer:
             'attention_mask': attention_masks
         }
         
-        # Convert to tensors
         if return_tensors == 'pt':
             result['input_ids'] = torch.tensor(result['input_ids'], dtype=torch.long)
             result['attention_mask'] = torch.tensor(result['attention_mask'], dtype=torch.long)
@@ -130,17 +90,6 @@ class ByteTokenizer:
         max_length: int = 8192,
         return_tensors: str = 'pt'
     ) -> dict:
-        """
-        Encode a batch of texts with padding.
-        
-        Args:
-            texts: List of strings
-            max_length: Maximum length
-            return_tensors: 'pt' for PyTorch
-        
-        Returns:
-            Dictionary with input_ids and attention_mask
-        """
         return self(
             texts,
             return_tensors=return_tensors,

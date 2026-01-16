@@ -219,7 +219,14 @@ def pretrain_on_novels(
     
     # Create dataset
     dataset = NovelDataset(novel_paths, tokenizer, seq_len=2048, overlap=256)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=True,
+        num_workers=4,  # Parallel data loading
+        pin_memory=True,  # Faster GPU transfer
+        persistent_workers=True  # Keep workers alive between epochs
+    )
     
     print(f"Created {len(dataset)} training chunks")
     
@@ -291,7 +298,15 @@ def train_consistency_classifier(
     
     # Create dataset
     dataset = ConsistencyDataset(train_df, novel_dir, tokenizer)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_consistency)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_consistency,
+        num_workers=2,  # Parallel data loading (fewer for smaller dataset)
+        pin_memory=True,  # Faster GPU transfer
+        persistent_workers=True  # Keep workers alive between epochs
+    )
     
     print(f"Training on {len(dataset)} samples")
     
@@ -377,7 +392,8 @@ def contrastive_finetune(
     lr: float = 1e-5,
     margin: float = 1.0,
     device: str = "cuda",
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    semantic_encoder = None  # Optional E5 encoder
 ) -> BDH_GPU:
     """
     Phase 3: Contrastive fine-tuning on labeled pairs.
@@ -455,7 +471,17 @@ def contrastive_finetune(
     print(f"Prepared {len(samples)} samples for contrastive training")
     
     # Optimizer (fine-tune with small LR)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    params = list(model.parameters())
+    if semantic_encoder is not None and semantic_encoder.projection is not None:
+        print("✨ Training Semantic Projection Layer (768 -> 2048)")
+        semantic_encoder.projection.train()
+        params += list(semantic_encoder.projection.parameters())
+    
+    optimizer = torch.optim.AdamW(params, lr=lr)
+    
+    # Semantic loss: Cosine Embedding Loss
+    # Target 1 (consistent), -1 (contradict)
+    sem_loss_fn = torch.nn.CosineEmbeddingLoss(margin=0.5)
     
     for epoch in range(epochs):
         total_loss = 0
@@ -465,6 +491,9 @@ def contrastive_finetune(
         # Shuffle samples
         import random
         random.shuffle(samples)
+        
+        # Metrics accumulators
+        tp = 0; tn = 0; fp = 0; fn = 0
         
         pbar = tqdm(range(0, len(samples), batch_size), desc=f"Epoch {epoch+1}/{epochs}")
         
@@ -495,23 +524,33 @@ def contrastive_finetune(
                 # Get perplexity WITHOUT backstory (fresh state)
                 ppl_without, _ = model.get_perplexity(stmt_tensor, None, per_sample=True)
                 
-                # Contrastive loss
-                # diff = ppl_with - ppl_without
-                # For consistent: we want ppl_with < ppl_without → diff < 0 → minimize diff
-                # For contradict: we want ppl_with > ppl_without → diff > 0 → maximize diff
+                # Contrastive loss (Perplexity)
                 diff = ppl_with - ppl_without
                 
                 if label == 1:  # Consistent
-                    # Loss = max(0, diff + margin)  → push diff below -margin
-                    loss = F.relu(diff + margin).mean()
+                    loss_ppl = F.relu(diff + margin).mean()
                 else:  # Contradict
-                    # Loss = max(0, -diff + margin) → push diff above margin
-                    loss = F.relu(-diff + margin).mean()
+                    loss_ppl = F.relu(-diff + margin).mean()
+                
+                loss = loss_ppl
+                
+                # Semantic Loss (if encoder present)
+                if semantic_encoder is not None:
+                    back_emb = semantic_encoder.encode_backstory(backstory)
+                    stmt_emb = semantic_encoder.encode_statement(statement)
+                    target = torch.tensor([1 if label == 1 else -1], device=device)
+                    loss_sem = sem_loss_fn(back_emb, stmt_emb, target)
+                    loss = loss_ppl + 0.5 * loss_sem
                 
                 batch_loss = batch_loss + loss
                 
-                # Track accuracy
+                # Track metrics
                 predicted = 1 if diff.item() < 0 else 0
+                if predicted == 1 and label == 1: tp += 1
+                elif predicted == 0 and label == 0: tn += 1
+                elif predicted == 1 and label == 0: fp += 1
+                elif predicted == 0 and label == 1: fn += 1
+                
                 if predicted == label:
                     correct += 1
                 total += 1
@@ -529,11 +568,35 @@ def contrastive_finetune(
         
         avg_loss = total_loss / max(1, len(samples) // batch_size)
         accuracy = correct / max(1, total)
-        print(f"Epoch {epoch+1}: Loss = {avg_loss:.4f}, Accuracy = {accuracy:.2%}")
+        
+        print(f"\nEpoch {epoch+1} Metrics:")
+        print(f"Loss = {avg_loss:.4f}, Accuracy = {accuracy:.2%}")
+        
+        # Calculate F1 etc
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0
+        rec = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0
+        
+        prec_c = tn / (tn + fn) if (tn + fn) > 0 else 0
+        rec_c = tn / (tn + fp) if (tn + fp) > 0 else 0
+        f1_c = 2 * prec_c * rec_c / (prec_c + rec_c) if (prec_c + rec_c) > 0 else 0
+        
+        macro_f1 = (f1 + f1_c) / 2
+        
+        print(f"Confusion Matrix: [TP={tp}, TN={tn}, FP={fp}, FN={fn}]")
+        print(f"Consistent (1): P={prec:.2%}, R={rec:.2%}, F1={f1:.4f}")
+        print(f"Contradict (0): P={prec_c:.2%}, R={rec_c:.2%}, F1={f1_c:.4f}")
+        print(f"Macro F1: {macro_f1:.4f}")
+        print("-" * 30)
     
     # Save
     if save_path:
         torch.save(model.state_dict(), save_path)
         print(f"Saved contrastive-finetuned model to {save_path}")
+        
+        if semantic_encoder is not None and semantic_encoder.projection is not None:
+            proj_path = save_path.replace(".pt", "_proj.pt")
+            torch.save(semantic_encoder.projection.state_dict(), proj_path)
+            print(f"Saved semantic projection to {proj_path}")
     
     return model

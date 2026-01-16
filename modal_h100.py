@@ -20,6 +20,8 @@ image = (
         "torch",
         "pandas",
         "tqdm",
+        "transformers",
+        "sentence-transformers",
     )
     .add_local_dir(".", remote_path="/root/bdh_workspace")
 )
@@ -52,8 +54,8 @@ def run_pipeline():
     print(f"🐉 BDH Dragon Hatchling Pipeline")
     print(f"🚀 Running on {torch.cuda.get_device_name(0)}")
     
-    # Configuration - use "small" for better capacity
-    config = CONFIGS["small"]  # ~12M params, more capacity for learning
+    # Configuration - use "small" for byte-level tokenizer (proven 57% accuracy)
+    config = CONFIGS["small"]  # 2048 neurons, vocab=256
     config.device = "cuda"
     
     DATA_DIR = "./files"
@@ -68,9 +70,9 @@ def run_pipeline():
     test_df = pd.read_csv(os.path.join(DATA_DIR, "test.csv"))
     print(f"📊 Train: {len(train_df)}, Test: {len(test_df)}")
     
-    # Check for cached model
-    pretrain_path = os.path.join(MODEL_DIR, "bdh_pretrained_small.pt")
-    contrastive_path = os.path.join(MODEL_DIR, "bdh_contrastive_small.pt")
+    # Force fresh training with byte-level tokenizer + E5 Semantic
+    pretrain_path = os.path.join(MODEL_DIR, "bdh_pretrained_sem_v1.pt")
+    contrastive_path = os.path.join(MODEL_DIR, "bdh_contrastive_sem_v1.pt")
     
     # Initialize model
     model = BDH_GPU(config)
@@ -93,36 +95,58 @@ def run_pipeline():
         )
         model_volume.commit()
     
-    # Phase 2: Contrastive fine-tuning (skip old classifier)
+    # Phase 2: Initialize Semantic Encoder (E5-Base)
+    # We do this BEFORE fine-tuning so we can train the projection layer
+    print("🔤 Loading E5-Base semantic encoder...")
+    from bdh.semantic_encoder import SemanticEncoder
+    semantic_encoder = SemanticEncoder(
+        target_dim=config.n_neurons,  # 2048
+        device="cuda",
+        use_projection=True  # Project 768 → 2048
+    )
+
+    # Phase 3: Contrastive fine-tuning (skip old classifier)
     if os.path.exists(contrastive_path):
         print(f"📦 Loading contrastive-finetuned model from {contrastive_path}")
         model.load_state_dict(torch.load(contrastive_path, map_location="cuda"))
+        
+        # Load projection if exists
+        proj_path = contrastive_path.replace(".pt", "_proj.pt")
+        if os.path.exists(proj_path):
+             print(f"📦 Loading semantic projection from {proj_path}")
+             semantic_encoder.projection.load_state_dict(torch.load(proj_path, map_location="cuda"))
+        else:
+             print("⚠️ No saved projection found, using random projection")
     else:
-        print("🏋️ Contrastive fine-tuning...")
+        print("🏋️ Contrastive fine-tuning (Model + Semantic Projection)...")
         model = contrastive_finetune(
             model,
             train_df,
             DATA_DIR,
             epochs=5,
-            batch_size=4,
+            batch_size=2,  # Reduced from 4 to prevent OOM with E5
             lr=1e-5,
             margin=1.0,
             device="cuda",
-            save_path=contrastive_path
+            save_path=contrastive_path,
+            semantic_encoder=semantic_encoder  # Train projection!
         )
         model_volume.commit()
     
-    # Phase 3: Generate predictions
+    # Phase 4: Generate predictions with semantic+perplexity
     output_path = "/root/bdh_workspace/submission.csv"
     result_df = generate_predictions(
         model,
-        None,  # No classifier, use perplexity-based
+        None,  # No classifier
         test_df,
         DATA_DIR,
         output_path,
         device="cuda",
         use_classifier=False,
-        perplexity_threshold=100.0
+        perplexity_threshold=100.0,
+        semantic_encoder=semantic_encoder,  # Pass E5 encoder
+        use_semantic=True,  # Use combined semantic+perplexity
+        alpha=0.5  # Equal weighting
     )
     
     # Read result for return

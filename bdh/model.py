@@ -138,6 +138,7 @@ class BDH_GPU(nn.Module):
         
         # Token embedding (byte-level)
         self.embed = nn.Embedding(config.vocab_size, config.n_neurons)
+        print(f"Byte-level embedding: vocab={config.vocab_size}, dim={config.n_neurons}")
         
         # BDH layers
         self.layers = nn.ModuleList([
@@ -160,7 +161,29 @@ class BDH_GPU(nn.Module):
             if isinstance(module, nn.Linear):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
             elif isinstance(module, nn.Embedding):
-                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                # Only init if not SBERT (SBERT loaded separately)
+                if module.weight.shape[0] != 30522:
+                    nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def _load_sbert_weights(self):
+        """Load pretrained SBERT embeddings."""
+        try:
+            from transformers import AutoModel
+            print("Loading SBERT embeddings...")
+            sbert = AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+            
+            # Copy weights
+            with torch.no_grad():
+                self.embed.weight.copy_(sbert.embeddings.word_embeddings.weight)
+            
+            # Freeze embeddings (highly recommended to prevent distortion)
+            self.embed.weight.requires_grad = False
+            print("SBERT embeddings loaded and frozen.")
+            
+        except ImportError:
+            print("WARNING: Transformers not installed. Using random embeddings for SBERT slot.")
+        except Exception as e:
+            print(f"WARNING: Failed to load SBERT weights: {e}")
     
     def forward(
         self,

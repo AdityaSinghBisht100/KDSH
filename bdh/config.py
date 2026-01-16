@@ -22,8 +22,8 @@ class BDHConfig:
     embed_dim: int = 256        # Embedding dimension per neuron (d in paper)
     n_layers: int = 4           # Number of BDH layers (L in paper)
     
-    # Vocabulary (byte-level, no tokenizer needed)
-    vocab_size: int = 256       # UTF-8 bytes
+    # Vocabulary (SBERT/BERT uses 30522)
+    vocab_size: int = 30522     # BERT vocab size
     
     # RoPE parameters
     rope_base: float = 10000.0
@@ -60,10 +60,11 @@ class BDHConfig:
         return emb + layers + out
 
 
-# Preset configurations matching Table 2 in the paper
+# Preset configurations matching Table 2 in the paper + SBERT variant
 CONFIGS = {
     "micro": BDHConfig(n_neurons=512, embed_dim=64, n_layers=2, n_heads=8),       # ~1M params
     "tiny": BDHConfig(n_neurons=1024, embed_dim=128, n_layers=2, n_heads=16),     # ~3M params
-    "small": BDHConfig(n_neurons=2048, embed_dim=256, n_layers=4, n_heads=32),    # ~12M params
+    "small": BDHConfig(n_neurons=2048, embed_dim=256, n_layers=4, n_heads=32),    # ~12M params (SBERT version uses this)
     "medium": BDHConfig(n_neurons=4096, embed_dim=384, n_layers=6, n_heads=64),   # ~50M params
+    "sbert": BDHConfig(n_neurons=2048, embed_dim=256, n_layers=4, n_heads=32, vocab_size=30522),
 }

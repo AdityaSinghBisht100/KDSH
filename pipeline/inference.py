@@ -23,54 +23,130 @@ def predict_with_perplexity(
     statement: str,
     tokenizer: ByteTokenizer,
     device: str = "cuda",
-    threshold: float = 100.0
+    threshold: float = 0.0 # Not used for difference check logic (implicit 0.0)
 ) -> Tuple[str, float, str]:
     """
-    Predict consistency using perplexity.
+    Predict consistency using Perplexity Difference (Contrastive).
     
-    Idea: 
-    - If the statement is consistent with the backstory, the model
-      (having "read" the backstory) will find it unsurprising (low perplexity).
-    - If it contradicts, the model will be surprised (high perplexity).
+    Logic:
+    - ppl_with: Perplexity of statement GIVEN backstory context.
+    - ppl_without: Perplexity of statement WITHOUT context.
     
-    Args:
-        model: Pretrained BDH model
-        backstory: Character backstory text
-        statement: Statement to check
-        tokenizer: Byte tokenizer
-        device: Device to use
-        threshold: Perplexity threshold for consistent/contradict
-    
-    Returns:
-        (prediction, perplexity, rationale)
+    If Consistent: Backstory helps -> ppl_with < ppl_without -> Diff < 0
+    If Contradict: Backstory hurts -> ppl_with > ppl_without -> Diff > 0
     """
     model.eval()
     
     with torch.no_grad():
-        # Tokenize
+        # Tokenize (truncate to fit model limits)
         back_tokens = tokenizer.encode(backstory)[:4096]
         stmt_tokens = tokenizer.encode(statement)[:512]
         
         back_tensor = torch.tensor([back_tokens], dtype=torch.long, device=device)
         stmt_tensor = torch.tensor([stmt_tokens], dtype=torch.long, device=device)
         
-        # Process backstory to get state
+        # 1. Perplexity WITH backstory context
+        # First, process backstory to get state
         _, state = model.forward(back_tensor)
+        # Then, get perplexity of statement given that state
+        ppl_with, _ = model.get_perplexity(stmt_tensor, state)
         
-        # Get perplexity of statement given backstory
-        perplexity, _ = model.get_perplexity(stmt_tensor, state)
-        ppl_value = perplexity.item()
+        # 2. Perplexity WITHOUT backstory (fresh state)
+        ppl_without, _ = model.get_perplexity(stmt_tensor, None)
         
-        # Classify based on perplexity
-        if ppl_value < threshold:
+        # 3. Compute Difference
+        # Diff = With - Without
+        diff = ppl_with.item() - ppl_without.item()
+        
+        if diff < 0:
             prediction = "consistent"
         else:
             prediction = "contradict"
         
-        rationale = f"Perplexity: {ppl_value:.2f}. {'Low (expected)' if ppl_value < threshold else 'High (surprising)'}."
+        rationale = f"PplDiff: {diff:.2f} (With: {ppl_with.item():.2f}, Without: {ppl_without.item():.2f})"
     
-    return prediction, ppl_value, rationale
+    return prediction, diff, rationale
 
+
+def predict_with_semantic(
+    model: BDH_GPU,
+    backstory: str,
+    statement: str,
+    tokenizer: ByteTokenizer,
+    semantic_encoder,  # SemanticEncoder instance
+    device: str = "cuda",
+    alpha: float = 0.5  # Weight for semantic vs perplexity (0=pure perplexity, 1=pure semantic)
+) -> Tuple[str, float, str]:
+    """
+    Predict consistency using COMBINED E5 Semantic + BDH Perplexity.
+    
+    This is the recommended approach:
+    1. E5-Base encodes backstory + statement as semantic vectors
+    2. Cosine similarity measures semantic alignment
+    3. BDH perplexity measures linguistic coherence
+    4. Combined score = alpha * semantic_score + (1-alpha) * perplexity_score
+    
+    Args:
+        model: BDH model (for perplexity)
+        backstory: Character backstory text
+        statement: Statement to check
+        tokenizer: Byte tokenizer for BDH
+        semantic_encoder: E5-Base SemanticEncoder instance
+        device: Device to use
+        alpha: Weight for semantic signal (0.5 = equal weighting)
+    
+    Returns:
+        (prediction, combined_score, rationale)
+    """
+    model.eval()
+    
+    # === Part 1: E5 Semantic Similarity ===
+    with torch.no_grad():
+        # Encode with E5 (sentence-level)
+        backstory_emb = semantic_encoder.encode_backstory(backstory)
+        statement_emb = semantic_encoder.encode_statement(statement)
+        
+        # Cosine similarity: higher = more semantically aligned
+        semantic_sim = semantic_encoder.compute_similarity(backstory_emb, statement_emb)
+        
+        # Normalize to [0, 1] range (cosine is [-1, 1])
+        semantic_score = (semantic_sim + 1) / 2  # Now in [0, 1]
+    
+    # === Part 2: BDH Perplexity Difference ===
+    with torch.no_grad():
+        back_tokens = tokenizer.encode(backstory)[:4096]
+        stmt_tokens = tokenizer.encode(statement)[:512]
+        
+        back_tensor = torch.tensor([back_tokens], dtype=torch.long, device=device)
+        stmt_tensor = torch.tensor([stmt_tokens], dtype=torch.long, device=device)
+        
+        # Perplexity WITH backstory
+        _, state = model.forward(back_tensor)
+        ppl_with, _ = model.get_perplexity(stmt_tensor, state)
+        
+        # Perplexity WITHOUT backstory
+        ppl_without, _ = model.get_perplexity(stmt_tensor, None)
+        
+        # Perplexity difference (negative = consistent)
+        ppl_diff = ppl_with.item() - ppl_without.item()
+        
+        # Normalize perplexity to [0, 1] score (using sigmoid-like mapping)
+        # diff < 0 (consistent) → high score → towards 1
+        # diff > 0 (contradict) → low score → towards 0
+        ppl_score = 1 / (1 + torch.exp(torch.tensor(ppl_diff / 100)).item())  # Scaled sigmoid
+    
+    # === Part 3: Combined Score ===
+    combined_score = alpha * semantic_score + (1 - alpha) * ppl_score
+    
+    # Threshold at 0.5
+    if combined_score > 0.5:
+        prediction = "consistent"
+    else:
+        prediction = "contradict"
+    
+    rationale = f"Combined: {combined_score:.3f} (Semantic: {semantic_score:.3f}, Ppl: {ppl_score:.3f}, sim={semantic_sim:.3f})"
+    
+    return prediction, combined_score, rationale
 
 def predict_with_classifier(
     model: BDH_GPU,
@@ -224,7 +300,10 @@ def generate_predictions(
     output_path: str,
     device: str = "cuda",
     use_classifier: bool = True,
-    perplexity_threshold: float = 100.0
+    perplexity_threshold: float = 100.0,
+    semantic_encoder = None,  # Optional SemanticEncoder
+    use_semantic: bool = True,  # Use semantic prediction when encoder available
+    alpha: float = 0.5  # Weight for semantic vs perplexity
 ) -> pd.DataFrame:
     """
     Generate predictions for test data.
@@ -238,6 +317,9 @@ def generate_predictions(
         device: Device to use
         use_classifier: Whether to use classifier or raw perplexity
         perplexity_threshold: Threshold for perplexity-based classification
+        semantic_encoder: E5-Base SemanticEncoder (optional)
+        use_semantic: Whether to use semantic+perplexity combination
+        alpha: Weight for semantic signal (0.5 = equal weighting)
     
     Returns:
         DataFrame with predictions
@@ -282,8 +364,13 @@ def generate_predictions(
             })
             continue
         
-        # Predict
-        if use_classifier and classifier is not None:
+        # Predict with semantic encoder if available
+        if use_semantic and semantic_encoder is not None:
+            pred, conf, rationale = predict_with_semantic(
+                model, backstory, content, tokenizer, 
+                semantic_encoder, device, alpha
+            )
+        elif use_classifier and classifier is not None:
             pred, conf, rationale = predict_with_classifier(
                 model, classifier, backstory, content, tokenizer, device
             )

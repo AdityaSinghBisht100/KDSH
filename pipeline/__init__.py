@@ -2,7 +2,7 @@
 Pipeline Package
 """
 from .train import pretrain_on_novels, train_consistency_classifier, NovelDataset, ConsistencyDataset, contrastive_finetune
-from .inference import generate_predictions, predict_with_perplexity, predict_with_classifier
+from .inference import generate_predictions, predict_with_perplexity, predict_with_classifier, predict_with_semantic
 
 __all__ = [
     "pretrain_on_novels",
@@ -13,4 +13,6 @@ __all__ = [
     "generate_predictions",
     "predict_with_perplexity",
     "predict_with_classifier",
+    "predict_with_semantic",
 ]
+
